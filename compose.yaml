@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:14 # mirrors Sentry's Postgres major version
+    command: ["postgres", "-c", "wal_level=logical"] # required for logical replication / CDC
+    environment:
+      POSTGRES_USER: monarch
+      POSTGRES_PASSWORD: monarch
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:

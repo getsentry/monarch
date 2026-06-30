@@ -1,0 +1,6 @@
+/target
+mock_storages/filestore/
+.venv/
+__pycache__/
+.DS_Store
+.mypy_cache
