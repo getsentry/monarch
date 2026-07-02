@@ -86,7 +86,7 @@ async fn drop_slot(org_id: i64) -> Result<(), Box<dyn std::error::Error>> {
 
 /// The file carrying membership from `snapshot` to `stream`. It must reflect what the snapshot
 /// saw (i.e. what the sink holds), so the stream can route deletes of rows that later vanished
-/// from the source. Stands in for reading the sink itself once apply is real.
+/// from the source. Stands in for deriving membership from the sink itself.
 fn membership_path(org_id: i64) -> String {
     format!("membership_org_{org_id}.json")
 }
@@ -112,8 +112,9 @@ async fn run_stream(org_id: i64) -> Result<(), Box<dyn std::error::Error>> {
     // freely without disturbing the seam.
     let membership = serde_json::from_str(&fs::read_to_string(membership_path(org_id))
         .map_err(|_| format!("no {} -- run `snapshot --org-id {org_id}` first", membership_path(org_id)))?)?;
-    let client = connect(SOURCE_DSN).await?;
+    let source = connect(SOURCE_DSN).await?;
+    let sink = connect(SINK_DSN).await?;
     let cfg: snapshot::Config = serde_yaml::from_str(&fs::read_to_string(CONFIG)?)?;
-    stream::run_stream(&client, &slot_name(org_id), &cfg, membership).await?;
+    stream::run_stream(&source, &sink, &slot_name(org_id), &cfg, membership).await?;
     Ok(())
 }
