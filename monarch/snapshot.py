@@ -1,7 +1,3 @@
-"""Snapshot: walk the org's tables parents-first, scoping each to the org. Collects the in-scope
-keys (which feed child queries and, later, the stream's initial membership) and streams each
-table's in-scope rows from source to sink via client-mediated COPY."""
-
 from psycopg import Connection, IsolationLevel, sql
 
 from .config import Config, Graph
@@ -43,11 +39,14 @@ def copy_table(source: Connection, sink: Connection, table: str, pred: sql.Compo
         return in_cur.rowcount  # set once the copy block closes; cleared when the cursor closes
 
 
-def run_snapshot(source: Connection, sink: Connection, cfg: Config, root_id: int) -> Membership:
+def run_snapshot(
+    source: Connection, sink: Connection, cfg: Config, root_id: int, snapshot_name: str
+) -> Membership:
     """Run the snapshot: parents-first scoped queries, collecting in-scope keys per table, then
     copy each table's rows to the sink. All source reads (id selects and COPYs) run in one
-    REPEATABLE READ transaction, so every table is read as of the same frozen snapshot. All sink
-    writes run in one transaction too: the org appears there atomically or not at all.
+    REPEATABLE READ transaction pinned to the slot's exported snapshot, so every table is read
+    as of the slot's consistent point. All sink writes run in one transaction too: the org
+    appears there atomically or not at all.
 
     Returns the in-scope keys per table -- the stream's initial membership. The caller persists
     it: membership must reflect what the snapshot saw (i.e. what the sink holds), not the source's
@@ -57,6 +56,11 @@ def run_snapshot(source: Connection, sink: Connection, cfg: Config, root_id: int
     graph = Graph(cfg)
     source.isolation_level = IsolationLevel.REPEATABLE_READ
     with source.transaction(), sink.transaction():
+        # SET TRANSACTION SNAPSHOT must run before the transaction's first query (else the
+        # transaction already has its own snapshot) and requires REPEATABLE READ.
+        source.execute(
+            sql.SQL("SET TRANSACTION SNAPSHOT {}").format(sql.Literal(snapshot_name))
+        )
         keys: dict[str, list[int]] = {}
         scoped: list[tuple[str, str, sql.Composable]] = []  # (table, scoped_by, pred) in copy order
         for table in graph.topological_sort():

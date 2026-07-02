@@ -1,12 +1,10 @@
-"""CLI mirroring the Rust prototype: snapshot / stream / create-slot / drop-slot."""
-
 import argparse
 import json
 import sys
 
 import psycopg
 
-from . import slot as slot_mod
+from . import slot
 from .config import Config, load_config
 from .snapshot import run_snapshot
 from .stream import Membership, run_stream
@@ -47,23 +45,26 @@ def load_membership(org_id: int) -> Membership:
 
 
 def cmd_snapshot(org_id: int, cfg: Config) -> None:
-    # Slot strictly before snapshot: nothing is missed, but gap changes are seen by both phases
-    # and may apply twice (see slot.py) -- the at-least-once seam a regular connection allows.
+    # The slot's exported snapshot pins the walk to the slot's consistent point: nothing missed,
+    # nothing seen by both phases. The Slot guard spans the whole snapshot: its connection must
+    # outlive the snapshot transaction, and a failure anywhere inside drops the slot (slot.py).
     with connect(SOURCE_DSN) as source, connect(SINK_DSN) as sink:
-        name = slot_name(org_id)
-        lsn = slot_mod.create_replication_slot(source, name)
-        print(f"slot {name} created at LSN {lsn}\n")
-        membership = run_snapshot(source, sink, cfg, org_id)
-        save_membership(org_id, membership)
-        print(f"\nmembership saved to {membership_path(org_id)}")
+        slot.ensure_publication(source)
+        with slot.Slot(SOURCE_DSN, slot_name(org_id)) as s:
+            lsn, snapshot = s.create()
+            print(f"slot {s.name} created at LSN {lsn} (snapshot {snapshot})\n")
+            membership = run_snapshot(source, sink, cfg, org_id, snapshot)
+            save_membership(org_id, membership)
+            print(f"\nmembership saved to {membership_path(org_id)}")
 
 
 def cmd_stream(org_id: int, cfg: Config) -> None:
-    # Resumes the slot the snapshot created -- the stream never creates one, so it can restart
-    # freely without disturbing the seam.
+    # Resumes the slot the snapshot created -- the stream never calls create(), so the Slot guard
+    # exits with created=False and the slot survives any crash for the next restart to resume.
     membership = load_membership(org_id)
     with connect(SOURCE_DSN) as source, connect(SINK_DSN) as sink:
-        run_stream(source, sink, slot_name(org_id), cfg, membership)
+        with slot.Slot(SOURCE_DSN, slot_name(org_id)) as s:
+            run_stream(source, sink, s.connection, slot_name(org_id), cfg, membership)
 
 
 def main() -> None:
@@ -74,8 +75,7 @@ def main() -> None:
     for cmd, doc in [
         ("snapshot", "Snapshot the org's data from source to sink; creates the slot"),
         ("stream", "Stream the org's changes from its slot to the sink until cutover"),
-        ("create-slot", "Create the org's replication slot and print its consistent point"),
-        ("drop-slot", "Drop the org's replication slot"),
+        ("drop-slot", "Drop the org's replication slot (after cutover, or to abort a move)"),
     ]:
         p = sub.add_parser(cmd, help=doc)
         p.add_argument("--org-id", type=int, required=True)
@@ -90,13 +90,9 @@ def main() -> None:
                 cmd_stream(args.org_id, cfg)
             except KeyboardInterrupt:
                 pass
-        case "create-slot":
-            with connect(SOURCE_DSN) as source:
-                lsn = slot_mod.create_replication_slot(source, slot_name(args.org_id))
-                print(f"slot {slot_name(args.org_id)} created at LSN {lsn} (stream resumes here)")
         case "drop-slot":
             with connect(SOURCE_DSN) as source:
-                slot_mod.drop_replication_slot(source, slot_name(args.org_id))
+                slot.drop_replication_slot(source, slot_name(args.org_id))
                 print(f"slot {slot_name(args.org_id)} dropped")
 
 

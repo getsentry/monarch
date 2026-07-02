@@ -1,52 +1,73 @@
-"""Stream polls the replication slot for changes, applies in-scope ones to the sink and maintains
-membership sets so children and later changes see rows that are in scope.
+"""Stream consumes the replication slot for changes, applies in-scope ones to the sink and
+maintains membership sets so children and later changes see rows that are in scope.
 
-The slot is created before the snapshot, so no change is missed - however this is currently
-at-least-once not exactly-once: changes may arrive in the gap so apply is idempotent
-(upsert / delete-if-present).
+The snapshot ran on the slot's exported snapshot, so snapshot and stream meet exactly at the
+slot's consistent point. Changes are buffered per source transaction and applied inside one sink
+transaction at the Commit marker, so the sink only ever shows states the source actually had.
+Apply stays idempotent (upsert / delete-if-present) for crash re-delivery: feedback is sent only
+at applied commit boundaries, so a restart replays whole transactions since the last flushed LSN.
 
 TailFilter is the perf seam: decode + scope decision + membership maintenance behind one
 filter_batch call, so a native implementation can replace it wholesale if the tail can't keep
 3x peak WAL rate (see DESIGN notes) -- discarded messages then never become Python objects.
 """
 
-import time
+import select
 
 from psycopg import Connection
 
 from .config import Config, Graph
-from .decode import Change, Decoder
-from .slot import PUBLICATION
+from .decode import Change, Commit, Decoder
+from .slot import PUBLICATION, ReplicationConnection
 
 Membership = dict[str, set[int]]
 
-_PEEK = """
-SELECT lsn::text, data FROM pg_logical_slot_peek_binary_changes(
-    %s, NULL, NULL, 'proto_version', '1', 'publication_names', %s)
-"""
-
 
 def run_stream(
-    source: Connection, sink: Connection, slot: str, cfg: Config, membership: Membership
+    source: Connection,
+    sink: Connection,
+    repl: ReplicationConnection,
+    slot: str,
+    cfg: Config,
+    membership: Membership,
 ) -> None:
-    """Poll decoded changes from `slot`, keep the in-scope ones (seeded by `membership`, grown as
-    rows enter scope), and apply each to the sink. Runs until interrupted -- the stream has no
-    natural end before cutover.
-    Peek, apply, then advance: `get_changes` would consume on read, losing every fetched-but-not-
-    applied change if the stream crashed. Peeking leaves the slot in place until the batch is
-    applied, so a crash re-delivers it -- duplicates, absorbed by idempotent apply, not loss."""
+    """Consume decoded changes from `slot`, keep the in-scope ones (seeded by `membership`, grown
+    as rows enter scope), and apply each source transaction atomically to the sink. Runs until
+    interrupted -- the stream has no natural end before cutover.
+    Apply, then ack: feedback flushes a commit's LSN only after its transaction hit the sink, so
+    a crash re-delivers whole unacked transactions -- duplicates, absorbed by idempotent apply,
+    not loss. Feedback goes on every commit, in-scope or not, so the slot advances (and the
+    source reclaims WAL) even when the org is idle while the cell is busy.
+    Buffering is per source transaction: a huge one (bulk update over in-scope rows) buffers in
+    memory until its Commit -- fine at prototype scale; pgoutput proto v2 streams these."""
     tail = TailFilter(Decoder(source), cfg, membership)
-    print(f"\nstream: polling slot {slot} for org changes (Ctrl-C to stop)\n")
-    while True:
-        rows = source.execute(_PEEK, (slot, PUBLICATION)).fetchall()
-        if not rows:
-            time.sleep(0.5)
-            continue
-        for change in tail.filter_batch(bytes(data) for _, data in rows):
-            apply_change(sink, change)
-        # the batch is applied; only now release it from the slot so WAL can be reclaimed
-        last = rows[-1][0]
-        source.execute("SELECT pg_replication_slot_advance(%s, %s::pg_lsn)", (slot, last))
+    pending: list[Change] = []
+    with repl.cursor() as cur:
+        cur.start_replication(
+            slot_name=slot,
+            decode=False,
+            options={"proto_version": "1", "publication_names": PUBLICATION},
+        )
+        print(f"\nstream: consuming slot {slot} for org changes (Ctrl-C to stop)\n")
+        # read_message + select instead of consume_stream: consume_stream is one long-running C
+        # call, and Python only delivers Ctrl-C between bytecode instructions -- so it can't be
+        # interrupted. select() returns control to the interpreter on a signal.
+        while True:
+            msg = cur.read_message()
+            if msg is None:
+                if not any(select.select([cur], [], [], 5.0)):
+                    cur.send_feedback()  # idle: heartbeat so the walsender keeps the connection
+                continue
+            for item in tail.filter_batch([msg.payload]):
+                if isinstance(item, Change):
+                    pending.append(item)
+                    continue
+                if pending:  # Commit: the buffered source transaction lands atomically
+                    with sink.transaction():
+                        for change in pending:
+                            apply_change(sink, change)
+                    pending.clear()
+                cur.send_feedback(flush_lsn=msg.data_start)
 
 
 class TailFilter:
@@ -64,12 +85,16 @@ class TailFilter:
             r.parent for cols in cfg.relationships.values() for r in cols.values() if r.parent
         }
 
-    def filter_batch(self, msgs) -> list[Change]:
-        out = []
+    def filter_batch(self, msgs) -> list[Change | Commit]:
+        """In-scope changes plus Commit markers (passed through: transaction boundaries are the
+        apply/ack unit downstream)."""
+        out: list[Change | Commit] = []
         for msg in msgs:
-            change = self.decoder.decode(msg)
-            if change is not None and self._admit(change):
-                out.append(change)
+            match self.decoder.decode(msg):
+                case Commit() as commit:
+                    out.append(commit)
+                case Change() as change if self._admit(change):
+                    out.append(change)
         return out
 
     def _admit(self, change: Change) -> bool:

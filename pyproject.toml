@@ -4,6 +4,7 @@ version = "0.0.0"
 description = "Move an organization's data between Sentry cells"
 requires-python = ">=3.12"
 dependencies = [
+    "psycopg2-binary>=2.9",
     "psycopg[binary]>=3.2",
     "PyYAML>=6",
 ]
@@ -15,6 +16,7 @@ monarch = "monarch.cli:main"
 dev = [
     "pyright>=1.1",
     "ruff>=0.14",
+    "types-psycopg2>=2.9.21.20260518",
 ]
 
 [tool.pyright]

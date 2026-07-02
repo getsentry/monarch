@@ -42,6 +42,10 @@ class Change:
         return None
 
 
+class Commit:
+    """End of a source transaction: the changes since the last Commit apply atomically."""
+
+
 @dataclass
 class _Relation:
     table: str
@@ -59,8 +63,9 @@ class Decoder:
         self.types: dict[int, str] = dict(rows)
         self.relations: dict[int, _Relation] = {}
 
-    def decode(self, data: bytes) -> Change | None:
-        """One message -> a row change, or None for the rest (begin/commit/relation/origin/type)."""
+    def decode(self, data: bytes) -> Change | Commit | None:
+        """One message -> a row change or a Commit marker; None for the rest
+        (begin/relation/origin/type)."""
         b = _Buf(data)
         kind = b.u8()
         if kind == ord("R"):
@@ -98,7 +103,9 @@ class Decoder:
             rel = self._relation(b.u32())
             b.u8()  # 'K' (key only, default replica identity) or 'O' (full old row)
             return Change(rel.table, "DELETE", self._read_tuple(rel, b))
-        if kind in b"BCOTM":  # begin/commit/origin/truncate/message
+        if kind == ord("C"):
+            return Commit()
+        if kind in b"BOTM":  # begin/origin/truncate/message
             return None
         raise ValueError(f"unknown pgoutput message kind {chr(kind)!r}")
 
