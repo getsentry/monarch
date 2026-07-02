@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:14 # mirrors Sentry's Postgres major version
+    build: . # postgres:14 (mirrors Sentry's major version) + wal2json
     command: ["postgres", "-c", "wal_level=logical"] # required for logical replication / CDC
     environment:
       POSTGRES_USER: monarch

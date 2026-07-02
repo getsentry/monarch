@@ -3,7 +3,7 @@ PSQL := $(COMPOSE) exec -T postgres psql -U monarch -v ON_ERROR_STOP=1 -q
 VENV := .venv
 PYTHON := $(VENV)/bin/python
 
-.PHONY: up down databases schema data psql venv snapshot
+.PHONY: up down databases schema data psql venv snapshot demo
 
 # Start / stop Postgres
 up:
@@ -26,8 +26,8 @@ databases:
 
 # Generate schema and apply to source and sink dbs
 schema: databases $(VENV)
-	$(PYTHON) mock_storages/generate_schema.py | $(PSQL) -d source
-	$(PYTHON) mock_storages/generate_schema.py | $(PSQL) -d sink
+	-$(PYTHON) mock_storages/generate_schema.py | $(PSQL) -d source
+	-$(PYTHON) mock_storages/generate_schema.py | $(PSQL) -d sink
 
 # Populate the source db with some example data
 data:
@@ -41,3 +41,10 @@ psql:
 ORG ?= 1
 snapshot:
 	cargo run -- snapshot --org-id $(ORG)
+
+# end-to-end demo of moving an org
+demo:
+	cargo run -q -- snapshot --org-id $(ORG)
+	$(PSQL) -d source -c 'INSERT INTO "group" (project_id) VALUES (1)'
+	cargo run -q -- stream --org-id $(ORG) & PID=$$!; sleep 5; kill $$PID
+	cargo run -q -- drop-slot --org-id $(ORG)

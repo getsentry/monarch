@@ -4,3 +4,4 @@ mock_storages/filestore/
 __pycache__/
 .DS_Store
 .mypy_cache
+membership_org_*.json
