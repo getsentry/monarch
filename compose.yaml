@@ -1,6 +1,6 @@
 services:
   postgres:
-    build: . # postgres:14 (mirrors Sentry's major version) + wal2json
+    image: postgres:14 # mirrors Sentry's major version; pgoutput decoding is built in
     command: ["postgres", "-c", "wal_level=logical"] # required for logical replication / CDC
     environment:
       POSTGRES_USER: monarch
