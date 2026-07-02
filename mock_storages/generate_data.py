@@ -36,7 +36,8 @@ def main() -> None:
                 columns.append(column)
                 if "blob" in ref:
                     contents = f"dummy blob for {org_name} {table}\n"
-                    key = hashlib.sha1(contents.encode()).hexdigest()  # content-addressed, flat — no org in the path
+                    # content-addressed, flat — no org in the path
+                    key = hashlib.sha1(contents.encode()).hexdigest()
                     values.append(f"'{key}'")
                     write_blob(stores[ref["blob"]], key, contents)
                 else:

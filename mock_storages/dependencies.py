@@ -28,7 +28,10 @@ def topological_sort(root: str, tables: Tables) -> list[str]:
     ordered, seen = [root], {root}
     remaining = [t for t in tables if t != root]
     while remaining:
-        ready = [t for t in remaining if all(ref["parent"] in seen for ref in tables[t].values() if "parent" in ref)]
+        ready = [
+            t for t in remaining
+            if all(ref["parent"] in seen for ref in tables[t].values() if "parent" in ref)
+        ]
         if not ready:
             break  # cycle / missing parent
         for t in ready:
