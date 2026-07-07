@@ -1,11 +1,14 @@
-"""Stream consumes the replication slot for changes, applies in-scope ones to the sink and
-maintains membership sets so children and later changes see rows that are in scope.
+"""Stream consumes each source database's replication slot for changes, applies in-scope ones
+to the sink and maintains membership sets so children and later changes see rows in scope.
 
-The snapshot ran on the slot's exported snapshot, so snapshot and stream meet exactly at the
-slot's consistent point. Changes are buffered per source transaction and applied inside one sink
-transaction at the Commit marker, so the sink only ever shows states the source actually had.
-Apply stays idempotent (upsert / delete-if-present) for crash re-delivery: feedback is sent only
-at applied commit boundaries, so a restart replays whole transactions since the last flushed LSN.
+Each snapshot ran on its slot's exported snapshot, so snapshot and stream meet exactly at that
+database's consistent point. All slots are consumed in one process, multiplexed over select():
+scoping is cross-database (a file row on one database is admitted by project membership grown
+from another), so the streams share one Scope. Per stream, changes are buffered per source
+transaction and applied inside sink transactions at the Commit marker, so the sink only ever
+shows states the source actually had. Apply stays idempotent (upsert / delete-if-present) for
+crash re-delivery: feedback is sent only at applied commit boundaries, so a restart replays
+whole transactions since that stream's last flushed LSN.
 
 TailFilter is the perf seam: decode + scope decision + membership maintenance behind one
 filter_batch call, so a native implementation can replace it wholesale if the tail can't keep
@@ -13,63 +16,107 @@ filter_batch call, so a native implementation can replace it wholesale if the ta
 """
 
 import select
+from dataclasses import dataclass, field
 
 from psycopg import Connection
 
-from .config import Config, Graph
+from .config import Cell, Database, Graph
 from .decode import Change, Commit, Decoder
-from psycopg2.extras import LogicalReplicationConnection
+from psycopg2.extras import LogicalReplicationConnection, ReplicationCursor
 
 from .slot import PUBLICATION
 
 Membership = dict[str, set[int]]
 
 
-def run_stream(
-    source: Connection,
-    sink: Connection,
-    repl: LogicalReplicationConnection,
-    slot: str,
-    cfg: Config,
+@dataclass
+class StreamSource:
+    db: Database
+    conn: Connection  # regular connection, for the decoder's type lookups
+    repl: LogicalReplicationConnection
+    slot: str
+
+
+class Scope:
+    """Scope state shared by every stream: membership, plus changes parked on a parent another
+    database's stream hasn't delivered yet. Within one database WAL order guarantees a parent's
+    change precedes its child's; across databases there is no order, so a child rejected only
+    for membership is parked and released when its parent arrives. Two honest gaps at demo
+    scale: parked changes whose parent never arrives (out-of-scope rows) accumulate -- eviction
+    needs a cross-stream watermark -- and a crash loses the park (its LSN is already flushed);
+    production would hold back flush_lsn or persist it."""
+
+    def __init__(self, membership: Membership) -> None:
+        self.membership = membership
+        self.parked: dict[tuple[str, int], list[Change]] = {}  # (parent, id) -> waiting
+
+
+@dataclass
+class _Stream:
+    db: Database
+    cursor: ReplicationCursor
+    tail: "TailFilter"
+    pending: list[Change] = field(default_factory=list)
+
+
+def run_streams(
+    sources: list[StreamSource],
+    sinks: dict[str, Connection],
+    sink: Cell,
+    graph: Graph,
     membership: Membership,
 ) -> None:
-    """Consume decoded changes from `slot`, keep the in-scope ones (seeded by `membership`, grown
-    as rows enter scope), and apply each source transaction atomically to the sink. Runs until
-    interrupted -- the stream has no natural end before cutover.
-    Apply, then ack: feedback flushes a commit's LSN only after its transaction hit the sink, so
-    a crash re-delivers whole unacked transactions -- duplicates, absorbed by idempotent apply,
-    not loss. Feedback goes on every commit, in-scope or not, so the slot advances (and the
-    source reclaims WAL) even when the org is idle while the cell is busy.
+    """Consume every source database's slot until interrupted -- the streams have no natural end
+    before cutover. Apply, then ack, per stream: feedback flushes a commit's LSN only after its
+    transaction hit the sink, so a crash re-delivers whole unacked transactions -- duplicates,
+    absorbed by idempotent apply, not loss. Feedback goes on every commit, in-scope or not, so
+    each slot advances (and its source reclaims WAL) even when the org is idle while the cell
+    is busy.
     Buffering is per source transaction: a huge one (bulk update over in-scope rows) buffers in
     memory until its Commit -- fine at prototype scale; pgoutput proto v2 streams these."""
-    tail = TailFilter(Decoder(source), cfg, membership)
-    pending: list[Change] = []
-    with repl.cursor() as cur:
+    sink_for = {t: sinks[db.dsn] for db in sink.databases for t in db.tables(graph)}
+    scope = Scope(membership)
+    streams = []
+    for s in sources:
+        cur = s.repl.cursor()
         cur.start_replication(
-            slot_name=slot,
+            slot_name=s.slot,
             decode=False,
             options={"proto_version": "1", "publication_names": PUBLICATION},
         )
-        print(f"\nstream: consuming slot {slot} for org changes (Ctrl-C to stop)\n")
-        # read_message + select instead of consume_stream: consume_stream is one long-running C
-        # call, and Python only delivers Ctrl-C between bytecode instructions -- so it can't be
-        # interrupted. select() returns control to the interpreter on a signal.
-        while True:
-            msg = cur.read_message()
-            if msg is None:
-                if not any(select.select([cur], [], [], 5.0)):
-                    cur.send_feedback()  # idle: heartbeat so the walsender keeps the connection
+        streams.append(_Stream(s.db, cur, TailFilter(Decoder(s.conn), graph, scope)))
+    names = ", ".join(st.db.dbname for st in streams)
+    print(f"\nstream: consuming slots on [{names}] for org changes (Ctrl-C to stop)\n")
+    # read_message + select instead of consume_stream: consume_stream is one long-running C
+    # call, and Python only delivers Ctrl-C between bytecode instructions -- so it can't be
+    # interrupted. select() returns control to the interpreter on a signal.
+    while True:
+        idle = True
+        for st in streams:
+            if (msg := st.cursor.read_message()) is None:
                 continue
-            for item in tail.filter_batch([msg.payload]):
-                if isinstance(item, Change):
-                    pending.append(item)
-                    continue
-                if pending:  # Commit: the buffered source transaction lands atomically
-                    with sink.transaction():
-                        for change in pending:
-                            apply_change(sink, change)
-                    pending.clear()
-                cur.send_feedback(flush_lsn=msg.data_start)
+            idle = False
+            apply_message(st, msg, sink_for)
+        if idle and not any(select.select([st.cursor for st in streams], [], [], 5.0)):
+            for st in streams:
+                st.cursor.send_feedback()  # idle: heartbeat so each walsender keeps its connection
+
+
+def apply_message(st: _Stream, msg, sink_for: dict[str, Connection]) -> None:
+    for item in st.tail.filter_batch([msg.payload]):
+        if isinstance(item, Change):
+            st.pending.append(item)
+            continue
+        if st.pending:  # Commit: the buffered source transaction lands atomically per sink db
+            by_sink: dict[Connection, list[Change]] = {}
+            for change in st.pending:
+                by_sink.setdefault(sink_for[change.table], []).append(change)
+            for conn, changes in by_sink.items():
+                with conn.transaction():
+                    for change in changes:
+                        apply_change(conn, change)
+            st.pending.clear()
+        st.cursor.send_feedback(flush_lsn=msg.data_start)
 
 
 class TailFilter:
@@ -78,14 +125,10 @@ class TailFilter:
     arriving through both snapshot and stream lands on the conflict arm, and a re-delivered
     delete is a no-op."""
 
-    def __init__(self, decoder: Decoder, cfg: Config, membership: Membership) -> None:
+    def __init__(self, decoder: Decoder, graph: Graph, scope: Scope) -> None:
         self.decoder = decoder
-        self.cfg = cfg
-        self.membership = membership
-        self.graph = Graph(cfg)
-        self.parents = {
-            r.parent for cols in cfg.relationships.values() for r in cols.values() if r.parent
-        }
+        self.graph = graph
+        self.scope = scope
 
     def filter_batch(self, msgs) -> list[Change | Commit]:
         """In-scope changes plus Commit markers (passed through: transaction boundaries are the
@@ -95,45 +138,51 @@ class TailFilter:
             match self.decoder.decode(msg):
                 case Commit() as commit:
                     out.append(commit)
-                case Change() as change if self._admit(change):
-                    out.append(change)
+                case Change() as change:
+                    out.extend(self._admit(change))
         return out
 
-    def _admit(self, change: Change) -> bool:
+    def _admit(self, change: Change) -> list[Change]:
+        """The admitted changes: [change] if in scope, plus any parked children its arrival
+        releases (recursively); [] otherwise. A change failing only on membership is parked,
+        not dropped -- its parent may be in flight on another database's stream (Scope)."""
+        membership = self.scope.membership
         row_id = change.get_int("id")
         if row_id is None:  # no key -> can't identify the row
-            return False
-        if change.table == self.cfg.root:
-            in_scope = row_id in self.membership.get(self.cfg.root, set())
+            return []
+        if change.table == self.graph.root:
+            in_scope = row_id in membership.get(self.graph.root, set())
         elif change.op == "DELETE":
             # A delete carries only the key. Parent tables scope through membership; a leaf delete
             # is applied blind, letting the sink scope it: the sink holds only in-scope rows for
             # this id space (staged sink, no other tenants), so the delete hits our row or matches
             # nothing. Scoping at the source instead would need REPLICA IDENTITY FULL on leaves.
             in_scope = (
-                change.table not in self.parents
-                or row_id in self.membership.get(change.table, set())
+                change.table not in self.graph.parents
+                or row_id in membership.get(change.table, set())
             )
-        elif (edge := self._scope_edge(change.table)) is not None:
-            column, parent = edge
-            value = change.get_int(column)
-            in_scope = value is not None and value in self.membership.get(parent, set())
+        elif (edge := self.graph.scope_edge(change.table)) is not None:
+            value = change.get_int(edge.column)
+            if value is None:
+                return []
+            in_scope = value in membership.get(edge.parent, set())
+            if not in_scope:
+                self.scope.parked.setdefault((edge.parent, value), []).append(change)
+                return []
         else:
             in_scope = False
         if not in_scope:
-            return False
-        if change.table in self.parents:
-            members = self.membership.setdefault(change.table, set())
-            members.discard(row_id) if change.op == "DELETE" else members.add(row_id)
-        return True
-
-    def _scope_edge(self, table: str) -> tuple[str, str] | None:
-        """The non-nullable edge scoping `table` to a parent: (column, parent). None for the root
-        or a table with no such edge. Row-level mirror of the snapshot's scope_predicate."""
-        for edge in self.graph.edges.get(table, []):
-            if not edge.nullable:
-                return edge.column, edge.parent
-        return None
+            return []
+        out = [change]
+        if change.table in self.graph.parents:
+            members = membership.setdefault(change.table, set())
+            if change.op == "DELETE":
+                members.discard(row_id)
+            else:
+                members.add(row_id)
+                for parked in self.scope.parked.pop((change.table, row_id), []):
+                    out.extend(self._admit(parked))
+        return out
 
 
 def apply_change(sink: Connection, change: Change) -> None:

@@ -1,31 +1,26 @@
 import argparse
 import json
-import os
 import sys
-from contextlib import closing
+from contextlib import ExitStack, closing
 
 import psycopg
 
 from . import slot
-from .config import Config, load_config
-from .snapshot import run_snapshot
-from .stream import Membership, run_stream
+from .config import Cell, Database, Graph, load_cells, load_graph
+from .snapshot import Source, run_snapshot
+from .stream import Membership, StreamSource, run_streams
 
-SOURCE_DSN = os.environ.get(
-    "MONARCH_SOURCE_DSN", "host=127.0.0.1 port=5432 user=monarch password=monarch dbname=source"
-)
-SINK_DSN = os.environ.get(
-    "MONARCH_SINK_DSN", "host=127.0.0.1 port=5432 user=monarch password=monarch dbname=sink"
-)
 CONFIG = "postgres_config.yaml"
+FLEET = "fleet.yaml"
 
 
 def connect(dsn: str) -> psycopg.Connection:
     return psycopg.connect(dsn, autocommit=True)
 
 
-def slot_name(org_id: int) -> str:
-    return f"monarch_org_{org_id}"
+def slot_name(org_id: int, db: Database) -> str:
+    # slots are database-scoped objects with independent LSNs: one per source database
+    return f"monarch_org_{org_id}_{db.dbname}"
 
 
 def membership_path(org_id: int) -> str:
@@ -50,26 +45,36 @@ def load_membership(org_id: int) -> Membership:
     return {table: set(ids) for table, ids in raw.items()}
 
 
-def cmd_snapshot(org_id: int, cfg: Config) -> None:
-    # The slot's exported snapshot pins the walk to the slot's consistent point: nothing missed,
-    # nothing seen by both phases. The Slot guard spans the whole snapshot: its connection must
-    # outlive the snapshot transaction, and a failure anywhere inside drops the slot (slot.py).
-    with connect(SOURCE_DSN) as source, connect(SINK_DSN) as sink:
-        slot.ensure_publication(source)
-        with slot.create_slot(SOURCE_DSN, slot_name(org_id)) as (lsn, snapshot):
-            print(f"slot {slot_name(org_id)} created at LSN {lsn} (snapshot {snapshot})\n")
-            membership = run_snapshot(source, sink, cfg, org_id, snapshot)
-            save_membership(org_id, membership)
-            print(f"\nmembership saved to {membership_path(org_id)}")
+def cmd_snapshot(org_id: int, graph: Graph, source: Cell, sink: Cell) -> None:
+    # Slot guards span the whole snapshot: every source database's slot + pinned connection
+    # must outlive the snapshot transactions, and a failure anywhere drops the slots (slot.py).
+    with ExitStack() as stack:
+        sinks = {db.dsn: stack.enter_context(connect(db.dsn)) for db in sink.databases}
+        sources = []
+        for db in source.databases:
+            conn = stack.enter_context(connect(db.dsn))
+            slot.ensure_publication(conn)
+            lsn, snapshot = stack.enter_context(slot.create_slot(db.dsn, slot_name(org_id, db)))
+            print(f"slot {slot_name(org_id, db)} created at LSN {lsn} (snapshot {snapshot})")
+            sources.append(Source(db, conn, snapshot))
+        print()
+        membership = run_snapshot(sources, sinks, sink, graph, org_id)
+        save_membership(org_id, membership)
+        print(f"\nmembership saved to {membership_path(org_id)}")
 
 
-def cmd_stream(org_id: int, cfg: Config) -> None:
-    # Resumes the slot the snapshot created -- the stream never creates or drops one, so it can
-    # crash and restart freely; the slot survives for the next resume.
+def cmd_stream(org_id: int, graph: Graph, source: Cell, sink: Cell) -> None:
+    # Resumes the slots the snapshot created -- the stream never creates or drops one, so it can
+    # crash and restart freely; the slots survive for the next resume.
     membership = load_membership(org_id)
-    with connect(SOURCE_DSN) as source, connect(SINK_DSN) as sink:
-        with closing(slot.connect_replication(SOURCE_DSN)) as repl:
-            run_stream(source, sink, repl, slot_name(org_id), cfg, membership)
+    with ExitStack() as stack:
+        sinks = {db.dsn: stack.enter_context(connect(db.dsn)) for db in sink.databases}
+        sources = []
+        for db in source.databases:
+            conn = stack.enter_context(connect(db.dsn))
+            repl = stack.enter_context(closing(slot.connect_replication(db.dsn)))
+            sources.append(StreamSource(db, conn, repl, slot_name(org_id, db)))
+        run_streams(sources, sinks, sink, graph, membership)
 
 
 def main() -> None:
@@ -78,27 +83,32 @@ def main() -> None:
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
     for cmd, doc in [
-        ("snapshot", "Snapshot the org's data from source to sink; creates the slot"),
-        ("stream", "Stream the org's changes from its slot to the sink until cutover"),
-        ("drop-slot", "Drop the org's replication slot (after cutover, or to abort a move)"),
+        ("snapshot", "Snapshot the org's data from source to sink; creates the slots"),
+        ("stream", "Stream the org's changes from its slots to the sink until cutover"),
+        ("drop-slot", "Drop the org's replication slots (after cutover, or to abort a move)"),
     ]:
         p = sub.add_parser(cmd, help=doc)
         p.add_argument("--org-id", type=int, required=True)
+        p.add_argument("--from", dest="source", default="source", help="source cell in fleet.yaml")
+        p.add_argument("--to", dest="sink", default="sink", help="destination cell in fleet.yaml")
     args = parser.parse_args()
 
-    cfg = load_config(CONFIG)
+    graph = load_graph(CONFIG)
+    cells = load_cells(FLEET)
+    source, sink = cells[args.source], cells[args.sink]
     match args.cmd:
         case "snapshot":
-            cmd_snapshot(args.org_id, cfg)
+            cmd_snapshot(args.org_id, graph, source, sink)
         case "stream":
             try:
-                cmd_stream(args.org_id, cfg)
+                cmd_stream(args.org_id, graph, source, sink)
             except KeyboardInterrupt:
                 pass
         case "drop-slot":
-            with connect(SOURCE_DSN) as source:
-                slot.drop_replication_slot(source, slot_name(args.org_id))
-                print(f"slot {slot_name(args.org_id)} dropped")
+            for db in source.databases:
+                with connect(db.dsn) as conn:
+                    slot.drop_replication_slot(conn, slot_name(args.org_id, db))
+                    print(f"slot {slot_name(args.org_id, db)} dropped")
 
 
 if __name__ == "__main__":

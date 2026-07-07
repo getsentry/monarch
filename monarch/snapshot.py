@@ -1,21 +1,32 @@
+from contextlib import ExitStack
+from dataclasses import dataclass
+
 from psycopg import Connection, IsolationLevel, sql
 
-from .config import Config, Graph
+from .config import Cell, Database, Graph
 from .stream import Membership
+
+
+@dataclass
+class Source:
+    """A pinned source database. Its connection must stay inside the slot guard (cli.py)."""
+
+    db: Database
+    conn: Connection
+    snapshot: str  # the slot's exported snapshot name
 
 
 def scope_predicate(
     graph: Graph, table: str, keys: dict[str, list[int]], root_id: int
 ) -> tuple[str, sql.Composable] | None:
     """The WHERE predicate scoping <table> to the org: `id = <root_id>` for the root, otherwise
-    `<col> IN (<parent keys>)` for any non-nullable edge -- such a column is on every row, so one
-    edge fully scopes the table; nullable edges are skipped. Returns None if the table has no
-    non-nullable edge, or that parent has no in-scope rows. Reused for both the id select (child
-    scoping) and the COPY extract.
+    `<col> IN (<parent keys>)` for the table's scope edge (graph.scope_edge). Returns None if the
+    table has no such edge, or that parent has no in-scope rows. Reused for both the id select
+    (child scoping) and the COPY extract.
     Literal IN suits the toy data; a high-cardinality parent is where = ANY(array) would kick in."""
     if table == graph.root:
         return "root", sql.SQL("id = {}").format(sql.Literal(root_id))
-    edge = next((e for e in graph.edges.get(table, []) if not e.nullable), None)
+    edge = graph.scope_edge(table)
     if edge is None:
         return None
     parent_keys = keys.get(edge.parent)
@@ -40,27 +51,36 @@ def copy_table(source: Connection, sink: Connection, table: str, pred: sql.Compo
 
 
 def run_snapshot(
-    source: Connection, sink: Connection, cfg: Config, root_id: int, snapshot_name: str
+    sources: list[Source], sinks: dict[str, Connection], sink: Cell, graph: Graph, root_id: int
 ) -> Membership:
-    """Run the snapshot: parents-first scoped queries, collecting in-scope keys per table, then
-    copy each table's rows to the sink. All source reads (id selects and COPYs) run in one
-    REPEATABLE READ transaction pinned to the slot's exported snapshot, so every table is read
-    as of the slot's consistent point. All sink writes run in one transaction too: the org
-    appears there atomically or not at all.
+    """Run the snapshot across every source database: parents-first scoped queries collecting
+    in-scope keys per table -- the keys dict is shared, so a table's predicate can consume
+    parent keys read from another database -- then copy each table's rows to its sink database.
 
-    Returns the in-scope keys per table -- the stream's initial membership. The caller persists
+    Each source database is read in one REPEATABLE READ transaction pinned to its own slot's
+    exported snapshot: consistent per database. The databases' consistent points differ
+    slightly; each database's stream resumes exactly at its own, so nothing is missed. Sink
+    writes are one transaction per sink database -- atomic per database, not across them
+    (that would need 2PC).
+
+    Returns the in-scope keys per table -- the streams' initial membership. The caller persists
     it: membership must reflect what the snapshot saw (i.e. what the sink holds), not the source's
     later state -- re-deriving it at stream start would silently drop deletes of rows that
     vanished in between."""
     print(f"snapshot: scoping org {root_id}\n")
-    graph = Graph(cfg)
-    source.isolation_level = IsolationLevel.REPEATABLE_READ
-    with source.transaction(), sink.transaction():
-        # SET TRANSACTION SNAPSHOT must run before the transaction's first query (else the
-        # transaction already has its own snapshot) and requires REPEATABLE READ.
-        source.execute(
-            sql.SQL("SET TRANSACTION SNAPSHOT {}").format(sql.Literal(snapshot_name))
-        )
+    source_for = {t: s.conn for s in sources for t in s.db.tables(graph)}
+    sink_for = {t: sinks[db.dsn] for db in sink.databases for t in db.tables(graph)}
+    for s in sources:
+        s.conn.isolation_level = IsolationLevel.REPEATABLE_READ
+    with ExitStack() as stack:
+        for s in sources:
+            stack.enter_context(s.conn.transaction())
+            # SET TRANSACTION SNAPSHOT must run before the transaction's first query (else the
+            # transaction already has its own snapshot) and requires REPEATABLE READ.
+            s.conn.execute(sql.SQL("SET TRANSACTION SNAPSHOT {}").format(sql.Literal(s.snapshot)))
+        for conn in sinks.values():
+            stack.enter_context(conn.transaction())
+
         keys: dict[str, list[int]] = {}
         scoped: list[tuple[str, str, sql.Composable]] = []  # (table, scoped_by, pred) in copy order
         for table in graph.topological_sort():
@@ -68,19 +88,20 @@ def run_snapshot(
                 print(f"  {table:<16} (no rows in scope)")
                 continue
             scoped_by, pred = scope
-            # ids feed child scoping (and become the stream's initial membership)
+            # ids feed child scoping (and become the streams' initial membership)
             select = sql.SQL("SELECT id FROM {} WHERE {}").format(sql.Identifier(table), pred)
-            keys[table] = [r[0] for r in source.execute(select).fetchall()]
+            keys[table] = [r[0] for r in source_for[table].execute(select).fetchall()]
             scoped.append((table, scoped_by, pred))
 
         # Clear any prior copy of the org from the sink, children first, so re-running is safe
         for table, _, pred in reversed(scoped):
-            sink.execute(sql.SQL("DELETE FROM {} WHERE {}").format(sql.Identifier(table), pred))
+            sink_for[table].execute(
+                sql.SQL("DELETE FROM {} WHERE {}").format(sql.Identifier(table), pred)
+            )
 
         for table, scoped_by, pred in scoped:
-            copied = copy_table(source, sink, table, pred)
+            copied = copy_table(source_for[table], sink_for[table], table, pred)
             print(f"  {table:<16} via {scoped_by:<18} {copied} row(s) -> sink")
 
     # Membership keeps only tables something references as a parent
-    parents = {r.parent for cols in cfg.relationships.values() for r in cols.values() if r.parent}
-    return {table: set(ids) for table, ids in keys.items() if table in parents}
+    return {table: set(ids) for table, ids in keys.items() if table in graph.parents}

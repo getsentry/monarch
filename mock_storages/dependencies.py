@@ -3,24 +3,29 @@ import os
 import yaml
 
 CONFIG = os.path.join(os.path.dirname(__file__), "..", "postgres_config.yaml")
+FLEET = os.path.join(os.path.dirname(__file__), "..", "fleet.yaml")
 
 # table -> {column -> ref}, where ref is {"parent": table} (FK edge) or {"blob": store} (blob key).
-# The root and any referenced-only table map to {}.
+# The root maps to {}. The manifest's reserved `store` key is stripped: placement is not a column.
 Tables = dict[str, dict[str, dict]]
 
 
-def load_from_config() -> tuple[str, Tables]:
-    """Parse postgres_config.yaml into (root, tables): each table's columns mapped to their ref."""
+def load_from_config() -> tuple[str, Tables, dict[str, str]]:
+    """Parse postgres_config.yaml into (root, tables, store_of): each table's columns mapped to
+    their ref, plus each table's logical store."""
     with open(CONFIG) as f:
         cfg = yaml.safe_load(f)
     root = cfg["root"]
     tables: Tables = {root: {}}
-    for table, cols in cfg["relationships"].items():
+    store_of: dict[str, str] = {}
+    for table, spec in cfg["relationships"].items():
+        cols = {c: ref for c, ref in spec.items() if c != "store"}
         tables[table] = cols
+        store_of[table] = spec["store"]
         for ref in cols.values():
             if "parent" in ref:
                 tables.setdefault(ref["parent"], {})
-    return root, tables
+    return root, tables, store_of
 
 
 def topological_sort(root: str, tables: Tables) -> list[str]:

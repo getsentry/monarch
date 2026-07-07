@@ -1,3 +1,7 @@
 {
-    "flake8.enabled": false
+    "flake8.enabled": false,
+    // Prevent vscode auto-applying Racher Fleet's schema to our fleet.yaml.
+    "yaml.schemas": {
+        ".vscode/anything.schema.json": "fleet.yaml"
+    }
 }

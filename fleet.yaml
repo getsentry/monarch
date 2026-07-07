@@ -1,0 +1,25 @@
+# Per-cell physical placement: each entry is one physical database (a DSN) and the logical
+# stores it hosts (see postgres_config.yaml for the stores themselves). The physical database
+# is the unit of machinery: its stores share one slot, snapshot, and stream.
+#
+# The demo's source cell splits one store out to its own database, mirroring the fleet:
+#   default/attachments = the PG16 pair's "source" database
+#   files               = the "source_files" database on the same pair
+# (monarch reads/decodes both on the standby; slots and streams are per database either way)
+#   sink                = the PG14 instance; all stores colocated in the one "sink" database
+cells:
+  source:
+    databases:
+      - dsn: host=127.0.0.1 port=5434 user=monarch password=monarch dbname=source
+        stores: [default, attachments]
+      - dsn: host=127.0.0.1 port=5434 user=monarch password=monarch dbname=source_files
+        stores: [files]
+    # blob stores have no slot/stream; the cell just names its bucket (mocked as a directory)
+    blobs:
+      filestore: { file_path: mock_storages/filestore/source }
+  sink:
+    databases:
+      - dsn: host=127.0.0.1 port=5432 user=monarch password=monarch dbname=sink
+        stores: [default, attachments, files]
+    blobs:
+      filestore: { file_path: mock_storages/filestore/sink }

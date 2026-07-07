@@ -1,41 +1,48 @@
-# Logical relationship graph used to scope an org move
+# The manifest: cell-independent schema knowledge. Which stores exist, which tables live in
+# which logical store, and how tables scope to the org. Where a logical store physically lives
+# is per-cell deployment reality and belongs in fleet.yaml, not here: big cells split stores
+# across database clusters, small cells colocate several stores in one database.
 
 root: organization
 
+stores:
+  # postgres stores mirror the fleet's clusters (default / attachments / files / ...)
+  default:     { type: postgres }
+  attachments: { type: postgres }
+  files:       { type: postgres }
+  # blob store: referenced by columns (path: {blob: filestore}), never walked
+  filestore:   { type: gcs_mock }
+
+# table -> store placement + the scoping edges. `store` is a reserved key; the rest are columns.
 relationships:
-  project:         { organization_id: { parent: organization } }
-  group:           { project_id: { parent: project } }
+  organization:    { store: default }
+  project:         { store: default, organization_id: { parent: organization } }
+  group:           { store: default, project_id: { parent: project } }
 
   # Org project columns exist here but are nullable, group_id is always present
-  groupinbox:      { organization_id: { parent: organization, nullable: true }, project_id: { parent: project, nullable: true }, group_id: { parent: group } }
-  promptsactivity: { organization_id: { parent: organization }, project_id: { parent: project } }
-  eventattachment: { project_id: { parent: project }, group_id: { parent: group, nullable: true } }
+  groupinbox:      { store: default, organization_id: { parent: organization, nullable: true }, project_id: { parent: project, nullable: true }, group_id: { parent: group } }
+  promptsactivity: { store: default, organization_id: { parent: organization }, project_id: { parent: project } }
+  eventattachment: { store: attachments, project_id: { parent: project }, group_id: { parent: group, nullable: true } }
 
   # Carries both group and project
-  groupassignee:   { group_id: { parent: group }, project_id: { parent: project } }
-  grouprelease:    { group_id: { parent: group }, project_id: { parent: project } }
+  groupassignee:   { store: default, group_id: { parent: group }, project_id: { parent: project } }
+  grouprelease:    { store: default, group_id: { parent: group }, project_id: { parent: project } }
   # project_id is stable as group_id can be null or changed on merge/unmerge
-  grouphash:       { project_id: { parent: project }, group_id: { parent: group, nullable: true } }
+  grouphash:       { store: default, project_id: { parent: project }, group_id: { parent: group, nullable: true } }
 
   # implicit foreign key without actual DB constraint, but we handle it all the same
-  commit:          { organization_id: { parent: organization } }
+  commit:          { store: default, organization_id: { parent: organization } }
 
   # these are HybridCloudForeighKey in Sentry, it's just a regular reference to us
-  apikey:          { organization_id: { parent: organization } }
-  orgauthtoken:    { organization_id: { parent: organization } }
+  apikey:          { store: default, organization_id: { parent: organization } }
+  orgauthtoken:    { store: default, organization_id: { parent: organization } }
 
   # Org ID is nullable, check if it's reliable otherwise scope by group_id instead
-  groupredirect:   { organization_id: { parent: organization, nullable: true }, group_id: { parent: group } }
+  groupredirect:   { store: default, organization_id: { parent: organization, nullable: true }, group_id: { parent: group } }
 
-  release:         { organization_id: { parent: organization } }
+  release:         { store: default, organization_id: { parent: organization } }
   # many to many relationship, we can go through release or project
-  releaseproject:  { release_id: { parent: release }, project_id: { parent: project } }
+  releaseproject:  { store: default, release_id: { parent: release }, project_id: { parent: project } }
 
   # files table that references an external blob storage
-  file:            { project_id: { parent: project }, path: { blob: filestore } }
-
-
-blobs:
-  filestore:
-    store: gcs_mock
-    file_path: mock_storages/filestore
+  file:            { store: files, project_id: { parent: project }, path: { blob: filestore } }

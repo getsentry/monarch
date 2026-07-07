@@ -9,7 +9,8 @@ use tokio_postgres::NoTls;
 
 const SOURCE_DSN: &str = "host=127.0.0.1 port=5432 user=monarch password=monarch dbname=source";
 const SINK_DSN: &str = "host=127.0.0.1 port=5432 user=monarch password=monarch dbname=sink";
-const CONFIG: &str = "postgres_config.yaml";
+// pinned pre-multi-store copy: the frozen reference doesn't track the manifest's store schema
+const CONFIG: &str = "postgres_config.rust.yaml";
 
 #[derive(Parser)]
 #[command(name = "monarch", about = "Move an organization's data between Sentry cells")]
