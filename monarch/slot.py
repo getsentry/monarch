@@ -15,8 +15,12 @@ import psycopg2.extras
 from psycopg import Connection
 from psycopg2.extras import LogicalReplicationConnection
 
-# The publication pgoutput decodes through. FOR ALL TABLES: org filtering is consumer-side
-# anyway (PG14 has no publisher row filters; even PG15+ row filters can't walk the org graph).
+# The publication pgoutput decodes through.
+# TODO: FOR ALL TABLES suits the demo, whose databases hold only manifest tables; production
+# should publish the manifest's table list (skips decoding tables monarch never moves, and
+# doesn't need superuser). On PG16 sources, also consider row filters - they can prune a column
+# by the org id or project id filter, though cannot walk the whole org graph, so our consumer
+# still needs to handle membership-based scoping.
 PUBLICATION = "monarch"
 
 

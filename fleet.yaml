@@ -14,12 +14,14 @@ cells:
         stores: [default, attachments]
       - dsn: host=127.0.0.1 port=5434 user=monarch password=monarch dbname=source_files
         stores: [files]
-    # blob stores have no slot/stream; the cell just names its bucket (mocked as a directory)
+    # blob stores have no slot/stream; the cell just names its bucket (a directory in the demo)
     blobs:
       filestore: { file_path: mock_storages/filestore/source }
+      attachment_blobs: { file_path: mock_storages/attachment_blobs/source }
   sink:
     databases:
       - dsn: host=127.0.0.1 port=5432 user=monarch password=monarch dbname=sink
         stores: [default, attachments, files]
     blobs:
       filestore: { file_path: mock_storages/filestore/sink }
+      attachment_blobs: { file_path: mock_storages/attachment_blobs/sink }

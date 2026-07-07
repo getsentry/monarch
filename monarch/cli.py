@@ -1,12 +1,16 @@
 import argparse
 import json
 import sys
+from collections.abc import Callable
 from contextlib import ExitStack, closing
+from functools import partial
 
 import psycopg
 
 from . import slot
+from .blobs import Bucket, copy_blob
 from .config import Cell, Database, Graph, load_cells, load_graph
+from .cell_eviction import run_evict
 from .snapshot import Source, run_snapshot
 from .stream import Membership, StreamSource, run_streams
 
@@ -45,6 +49,16 @@ def load_membership(org_id: int) -> Membership:
     return {table: set(ids) for table, ids in raw.items()}
 
 
+def blob_copiers(graph: Graph, source: Cell, sink: Cell) -> dict[str, Callable[[str], bool]]:
+    """Blob store name -> copy(key) from the source cell's bucket to the sink cell's."""
+    return {
+        name: partial(copy_blob, Bucket(source.blobs[name]["file_path"]),
+                      Bucket(sink.blobs[name]["file_path"]))
+        for name, store in graph.stores.items()
+        if store.type == "blob_store"
+    }
+
+
 def cmd_snapshot(org_id: int, graph: Graph, source: Cell, sink: Cell) -> None:
     # Slot guards span the whole snapshot: every source database's slot + pinned connection
     # must outlive the snapshot transactions, and a failure anywhere drops the slots (slot.py).
@@ -58,7 +72,7 @@ def cmd_snapshot(org_id: int, graph: Graph, source: Cell, sink: Cell) -> None:
             print(f"slot {slot_name(org_id, db)} created at LSN {lsn} (snapshot {snapshot})")
             sources.append(Source(db, conn, snapshot))
         print()
-        membership = run_snapshot(sources, sinks, sink, graph, org_id)
+        membership = run_snapshot(sources, sinks, sink, graph, org_id, blob_copiers(graph, source, sink))
         save_membership(org_id, membership)
         print(f"\nmembership saved to {membership_path(org_id)}")
 
@@ -74,7 +88,23 @@ def cmd_stream(org_id: int, graph: Graph, source: Cell, sink: Cell) -> None:
             conn = stack.enter_context(connect(db.dsn))
             repl = stack.enter_context(closing(slot.connect_replication(db.dsn)))
             sources.append(StreamSource(db, conn, repl, slot_name(org_id, db)))
-        run_streams(sources, sinks, sink, graph, membership)
+        run_streams(sources, sinks, sink, graph, membership, blob_copiers(graph, source, sink))
+
+
+def cmd_evict(org_id: int, graph: Graph, cell: Cell) -> None:
+    # Refuse while any of the org's slots survive on the cell: a live stream would replicate
+    # the eviction to the sink as ordinary deletes (evict.py). Checked per database.
+    with ExitStack() as stack:
+        conns = {db.dsn: stack.enter_context(connect(db.dsn)) for db in cell.databases}
+        for db in cell.databases:
+            live = conns[db.dsn].execute(
+                "SELECT 1 FROM pg_replication_slots WHERE slot_name = %s",
+                (slot_name(org_id, db),),
+            ).fetchone()
+            if live:
+                sys.exit(f"slot {slot_name(org_id, db)} still exists -- run drop-slot first")
+        buckets = {name: Bucket(loc["file_path"]) for name, loc in cell.blobs.items()}
+        run_evict(conns, cell, graph, org_id, buckets)
 
 
 def main() -> None:
@@ -91,24 +121,30 @@ def main() -> None:
         p.add_argument("--org-id", type=int, required=True)
         p.add_argument("--from", dest="source", default="source", help="source cell in fleet.yaml")
         p.add_argument("--to", dest="sink", default="sink", help="destination cell in fleet.yaml")
+    p = sub.add_parser(
+        "evict", help="Delete the org's rows from a cell: source after cutover, sink to abort"
+    )
+    p.add_argument("--org-id", type=int, required=True)
+    p.add_argument("--cell", default="source", help="cell to evict the org from (fleet.yaml)")
     args = parser.parse_args()
 
     graph = load_graph(CONFIG)
     cells = load_cells(FLEET)
-    source, sink = cells[args.source], cells[args.sink]
     match args.cmd:
         case "snapshot":
-            cmd_snapshot(args.org_id, graph, source, sink)
+            cmd_snapshot(args.org_id, graph, cells[args.source], cells[args.sink])
         case "stream":
             try:
-                cmd_stream(args.org_id, graph, source, sink)
+                cmd_stream(args.org_id, graph, cells[args.source], cells[args.sink])
             except KeyboardInterrupt:
                 pass
         case "drop-slot":
-            for db in source.databases:
+            for db in cells[args.source].databases:
                 with connect(db.dsn) as conn:
                     slot.drop_replication_slot(conn, slot_name(args.org_id, db))
                     print(f"slot {slot_name(args.org_id, db)} dropped")
+        case "evict":
+            cmd_evict(args.org_id, graph, cells[args.cell])
 
 
 if __name__ == "__main__":

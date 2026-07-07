@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
 
@@ -50,8 +51,31 @@ def copy_table(source: Connection, sink: Connection, table: str, pred: sql.Compo
         return in_cur.rowcount  # set once the copy block closes; cleared when the cursor closes
 
 
+def copy_scoped_blobs(
+    source: Connection,
+    table: str,
+    pred: sql.Composable,
+    graph: Graph,
+    copiers: dict[str, Callable[[str], bool]],
+) -> int:
+    """Copy the blobs behind <table>'s blob columns for in-scope rows, before the rows: a row
+    must never land in the sink ahead of its bytes. Keys are read in the pinned transaction."""
+    copied = 0
+    for column, store in graph.blobs.get(table, {}).items():
+        keys = sql.SQL("SELECT DISTINCT {c} FROM {t} WHERE {p} AND {c} IS NOT NULL").format(
+            c=sql.Identifier(column), t=sql.Identifier(table), p=pred
+        )
+        copied += sum(copiers[store](key) for (key,) in source.execute(keys).fetchall())
+    return copied
+
+
 def run_snapshot(
-    sources: list[Source], sinks: dict[str, Connection], sink: Cell, graph: Graph, root_id: int
+    sources: list[Source],
+    sinks: dict[str, Connection],
+    sink: Cell,
+    graph: Graph,
+    root_id: int,
+    copiers: dict[str, Callable[[str], bool]],
 ) -> Membership:
     """Run the snapshot across every source database: parents-first scoped queries collecting
     in-scope keys per table -- the keys dict is shared, so a table's predicate can consume
@@ -100,8 +124,10 @@ def run_snapshot(
             )
 
         for table, scoped_by, pred in scoped:
+            blobs = copy_scoped_blobs(source_for[table], table, pred, graph, copiers)
             copied = copy_table(source_for[table], sink_for[table], table, pred)
-            print(f"  {table:<16} via {scoped_by:<18} {copied} row(s) -> sink")
+            extra = f" + {blobs} blob(s)" if table in graph.blobs else ""
+            print(f"  {table:<16} via {scoped_by:<18} {copied} row(s){extra} -> sink")
 
     # Membership keeps only tables something references as a parent
     return {table: set(ids) for table, ids in keys.items() if table in graph.parents}

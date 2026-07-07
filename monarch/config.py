@@ -5,14 +5,19 @@ cells colocate several in one database)."""
 
 import graphlib
 from dataclasses import dataclass, field
+from typing import Literal
 
 import yaml
+
+StoreType = Literal["postgres", "blob_store"]
+Eviction = Literal["delete", "keep"]
 
 
 @dataclass
 class Store:
     name: str
-    type: str  # postgres | gcs_mock
+    type: StoreType
+    eviction: Eviction | None = None  # blob stores only: does eviction delete the org's objects?
 
 
 @dataclass
@@ -30,6 +35,7 @@ class Graph:
     stores: dict[str, Store]
     store_of: dict[str, str]  # table -> logical store name
     edges: dict[str, list[Edge]]  # table -> parent edges
+    blobs: dict[str, dict[str, str]]  # table -> blob column -> blob store name
     parents: set[str] = field(init=False)  # tables something references as a parent
 
     def __post_init__(self) -> None:
@@ -53,18 +59,31 @@ class Graph:
 def load_graph(path: str) -> Graph:
     with open(path) as f:
         raw = yaml.safe_load(f)
-    stores = {name: Store(name, meta["type"]) for name, meta in raw["stores"].items()}
+    stores: dict[str, Store] = {}
+    for name, meta in raw["stores"].items():
+        if meta["type"] not in ("postgres", "blob_store"):
+            raise ValueError(f"store {name}: unknown type {meta['type']!r}")
+        eviction = meta.get("eviction")
+        if meta["type"] == "blob_store" and eviction not in ("delete", "keep"):
+            raise ValueError(f"store {name}: blob stores need eviction: delete|keep, got {eviction!r}")
+        if meta["type"] == "postgres" and eviction is not None:
+            raise ValueError(f"store {name}: eviction only applies to blob stores")
+        stores[name] = Store(name, meta["type"], eviction)
     store_of: dict[str, str] = {}
     edges: dict[str, list[Edge]] = {}
+    blobs: dict[str, dict[str, str]] = {}
     for table, spec in raw["relationships"].items():
         store_of[table] = spec["store"]
         for column, ref in spec.items():
-            if column == "store" or "parent" not in ref:
-                continue  # reserved key, or a non-FK column (blob pointers): the walk skips them
-            edges.setdefault(table, []).append(
-                Edge(column, ref["parent"], ref.get("nullable", False))
-            )
-    return Graph(root=raw["root"], stores=stores, store_of=store_of, edges=edges)
+            if column == "store":
+                continue  # reserved key: placement, not a column
+            if "parent" in ref:
+                edges.setdefault(table, []).append(
+                    Edge(column, ref["parent"], ref.get("nullable", False))
+                )
+            elif "blob" in ref:
+                blobs.setdefault(table, {})[column] = ref["blob"]
+    return Graph(root=raw["root"], stores=stores, store_of=store_of, edges=edges, blobs=blobs)
 
 
 @dataclass
@@ -85,7 +104,7 @@ class Database:
 class Cell:
     name: str
     databases: list[Database]
-    blobs: dict[str, dict]  # blob store name -> location (e.g. gcs_mock's file_path)
+    blobs: dict[str, dict]  # blob store name -> location in this cell (file_path)
 
     def dsn_for(self, store: str) -> str:
         return next(db.dsn for db in self.databases if store in db.stores)

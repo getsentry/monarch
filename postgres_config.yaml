@@ -1,7 +1,7 @@
 # The manifest: cell-independent schema knowledge. Which stores exist, which tables live in
 # which logical store, and how tables scope to the org. Where a logical store physically lives
-# is per-cell deployment reality and belongs in fleet.yaml, not here: big cells split stores
-# across database clusters, small cells colocate several stores in one database.
+# is per-cell deployment configuration and belongs in fleet.yaml, not here. Some cells split stores
+# across database clusters, others colocate several stores in one database.
 
 root: organization
 
@@ -10,8 +10,13 @@ stores:
   default:     { type: postgres }
   attachments: { type: postgres }
   files:       { type: postgres }
-  # blob store: referenced by columns (path: {blob: filestore}), never walked
-  filestore:   { type: gcs_mock }
+  # filestore is not org/project scoped so it is not safe to delete blobs referenced by
+  # a specific project. Sentry's delete_unreferenced_blobs() / cleanup_unused_files()
+  # is responsible for GC on the filestore.
+  filestore:   { type: blob_store, eviction: keep }
+  # no reclaimer exists in Sentry, we should delete the object when the row is removed
+  # (in objectstore's attachments in production a retention TTL also exists as a backstop)
+  attachment_blobs: { type: blob_store, eviction: delete }
 
 # table -> store placement + the scoping edges. `store` is a reserved key; the rest are columns.
 relationships:
@@ -22,7 +27,7 @@ relationships:
   # Org project columns exist here but are nullable, group_id is always present
   groupinbox:      { store: default, organization_id: { parent: organization, nullable: true }, project_id: { parent: project, nullable: true }, group_id: { parent: group } }
   promptsactivity: { store: default, organization_id: { parent: organization }, project_id: { parent: project } }
-  eventattachment: { store: attachments, project_id: { parent: project }, group_id: { parent: group, nullable: true } }
+  eventattachment: { store: attachments, project_id: { parent: project }, group_id: { parent: group, nullable: true }, blob_path: { blob: attachment_blobs } }
 
   # Carries both group and project
   groupassignee:   { store: default, group_id: { parent: group }, project_id: { parent: project } }

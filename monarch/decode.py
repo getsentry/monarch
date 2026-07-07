@@ -35,11 +35,15 @@ class Change:
     op: str  # INSERT | UPDATE | DELETE
     cols: list[Column]
 
-    def get_int(self, name: str) -> int | None:
+    def get(self, name: str) -> str | None:
         for c in self.cols:
             if c.name == name:
-                return int(c.value) if c.value is not None else None
+                return c.value
         return None
+
+    def get_int(self, name: str) -> int | None:
+        value = self.get(name)
+        return int(value) if value is not None else None
 
 
 class Commit:

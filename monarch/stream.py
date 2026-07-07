@@ -16,6 +16,7 @@ filter_batch call, so a native implementation can replace it wholesale if the ta
 """
 
 import select
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from psycopg import Connection
@@ -65,6 +66,7 @@ def run_streams(
     sink: Cell,
     graph: Graph,
     membership: Membership,
+    copiers: dict[str, Callable[[str], bool]],
 ) -> None:
     """Consume every source database's slot until interrupted -- the streams have no natural end
     before cutover. Apply, then ack, per stream: feedback flushes a commit's LSN only after its
@@ -96,13 +98,19 @@ def run_streams(
             if (msg := st.cursor.read_message()) is None:
                 continue
             idle = False
-            apply_message(st, msg, sink_for)
+            apply_message(st, msg, sink_for, graph, copiers)
         if idle and not any(select.select([st.cursor for st in streams], [], [], 5.0)):
             for st in streams:
                 st.cursor.send_feedback()  # idle: heartbeat so each walsender keeps its connection
 
 
-def apply_message(st: _Stream, msg, sink_for: dict[str, Connection]) -> None:
+def apply_message(
+    st: _Stream,
+    msg,
+    sink_for: dict[str, Connection],
+    graph: Graph,
+    copiers: dict[str, Callable[[str], bool]],
+) -> None:
     for item in st.tail.filter_batch([msg.payload]):
         if isinstance(item, Change):
             st.pending.append(item)
@@ -114,6 +122,11 @@ def apply_message(st: _Stream, msg, sink_for: dict[str, Connection]) -> None:
             for conn, changes in by_sink.items():
                 with conn.transaction():
                     for change in changes:
+                        # blob before row: a row must never land ahead of its bytes. DELETEs
+                        # carry only the key, so get() is None and the blob stays (blobs.py).
+                        for column, store in graph.blobs.get(change.table, {}).items():
+                            if (key := change.get(column)) is not None:
+                                copiers[store](key)
                         apply_change(conn, change)
             st.pending.clear()
         st.cursor.send_feedback(flush_lsn=msg.data_start)

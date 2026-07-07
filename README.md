@@ -1,6 +1,24 @@
 # Moving organization data: Postgres and file storage
 
-This prototype demonstrates moving Postgres and file storage data indexed in Postgres between cells in Sentry's infrastructure.
+Monarch is a live migration system for self-contained data graphs that span
+multiple physical databases. It builds a graph of every row reachable from a
+root record through its foreign keys, plus the external objects those rows
+reference as one consistent snapshot, then streams changes arriving after the
+snapshot to the target data store.
+
+It can be used to migrate an organization as a single unit from one Sentry
+deployment to another, carrying the organization's projects, issues, files
+and other dependencies with it.
+
+Sentry's Postgres topology makes logical replication harder than it sounds: an
+organization's Postgres data actually spans 9+ instances, and the relationships
+between tables are not real foreign keys: they live in multiple database instances
+and blob storage systems with no shared transaction boundaries or single WAL to tie
+them togther.
+
+This repo aims to prototype two things:
+1. the per-store move itself — snapshot, stream, blob copy - such that no records are missed
+2. the coordination layer that maps the relationships between stores and migrates them together
 
 ## How it works
 
@@ -39,7 +57,4 @@ cargo run -- stream --org-id 1     # stream acme's data from source to sink
 
 - **Control silo sync** — org-global data lives in the control silo and never moves, so a move
   has to reconcile those cross-silo references rather than copy them.
-- **Cross-database references** — the single `REPEATABLE READ` snapshot (and its one LSN) holds
-  within one Postgres database. A cell is several physical databases, and FK-like references
-  that span them each have their own snapshot and LSN, so the seam isn't a single point.
 

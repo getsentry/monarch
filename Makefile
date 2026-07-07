@@ -5,7 +5,7 @@ COMPOSE := docker compose
 PSQL := $(COMPOSE) exec -T postgres psql -U monarch -v ON_ERROR_STOP=1 -q
 SOURCE_PSQL := $(COMPOSE) exec -T primary psql -U monarch -v ON_ERROR_STOP=1 -q
 
-.PHONY: up down install databases schema data reset-sink demo snapshot \
+.PHONY: up down install databases schema data reset demo snapshot evict-source evict-sink \
 	psql-source psql-standby psql-files psql-sink rust-schema rust-data demo-rs
 
 up:
@@ -26,6 +26,7 @@ databases:
 # Each source database gets only its stores' tables, mirroring fleet.yaml; the sink colocates
 # every store so it gets them all. Publications are catalog objects: created on the primary,
 # they replicate physically to the standby where pgoutput reads them.
+# FOR ALL TABLES is just for demo - we should filter tables and ideally rows too in the publication
 schema: databases
 	-uv run python mock_storages/generate_schema.py default attachments | $(SOURCE_PSQL) -d source
 	-$(SOURCE_PSQL) -d source -c "CREATE PUBLICATION monarch FOR ALL TABLES"
@@ -38,11 +39,15 @@ data:
 	uv run python mock_storages/generate_data.py default attachments | $(SOURCE_PSQL) -d source
 	uv run python mock_storages/generate_data.py files | $(SOURCE_PSQL) -d source_files
 
-# Drop and rebuild the (shared) sink db
-reset-sink:
-	$(PSQL) -d postgres -c "DROP DATABASE sink"
-	$(PSQL) -d postgres -c "CREATE DATABASE sink"
-	uv run python mock_storages/generate_schema.py | $(PSQL) -d sink
+# Reset the demo to a blank slate: drop every database, both buckets, and the move's
+# membership files (rebuild with `make schema data`). Slots on the standby are dropped
+# first: a database can't be dropped while a logical slot targets it.
+reset:
+	-$(COMPOSE) exec -T standby psql -U monarch -d postgres -c "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name LIKE 'monarch_%'"
+	$(SOURCE_PSQL) -d postgres -c "DROP DATABASE IF EXISTS source"
+	$(SOURCE_PSQL) -d postgres -c "DROP DATABASE IF EXISTS source_files"
+	$(PSQL) -d postgres -c "DROP DATABASE IF EXISTS sink"
+	rm -rf mock_storages/filestore mock_storages/attachment_blobs membership_org_*.json
 
 psql-source:
 	$(COMPOSE) exec primary psql -U monarch -d source
@@ -64,8 +69,21 @@ demo:
 	@( for i in $$(seq 1 15); do sleep 1; $(SOURCE_PSQL) -d postgres -c "SELECT pg_log_standby_snapshot()" >/dev/null 2>&1; done ) &
 	uv run monarch snapshot --org-id $(ORG)
 	$(SOURCE_PSQL) -d source -c 'INSERT INTO "group" (project_id) VALUES (1)'
+	@key=$$(uv run python mock_storages/write_blob.py 'streamed demo blob'); \
+		$(SOURCE_PSQL) -d source_files -c "INSERT INTO file (project_id, path) VALUES (1, '$$key')"
 	PYTHONUNBUFFERED=1 uv run monarch stream --org-id $(ORG) & PID=$$!; sleep 5; kill $$PID
 	uv run monarch drop-slot --org-id $(ORG)
+
+# Eviction (refuses while the org's slots still exist -- a live stream would replicate the
+# deletes to the sink). evict-source = post-cutover cleanup, the org has moved; evict-sink =
+# abort, clearing a failed copy. Control silo untouched. Blobs stay: in production the cell's
+# own GC (Sentry cleanup) reclaims unreferenced bytes; the demo has no such job, so orphans
+# persist until `make reset`.
+evict-source:
+	uv run monarch evict --org-id $(ORG) --cell source
+
+evict-sink:
+	uv run monarch evict --org-id $(ORG) --cell sink
 
 # ---- legacy rust demo: single store only with pg14 source ----
 rust-schema: databases

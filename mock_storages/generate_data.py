@@ -26,6 +26,8 @@ def write_blob(blob: dict, key: str, contents: str) -> None:
 def main() -> None:
     with open(FLEET) as f:
         blobs = yaml.safe_load(f)["cells"]["source"]["blobs"]
+    with open(CONFIG) as f:
+        stores = yaml.safe_load(f)["stores"]
     root, tables, store_of = load_from_config()
     stores = set(sys.argv[1:])  # no args = all stores
     sorted_tables = topological_sort(root, tables)
@@ -42,11 +44,17 @@ def main() -> None:
             for column, ref in tables[table].items():
                 columns.append(column)
                 if "blob" in ref:
+                    store = ref["blob"]
                     contents = f"dummy blob for {org_name} {table}\n"
-                    # content-addressed, flat — no org in the path
-                    key = hashlib.sha1(contents.encode()).hexdigest()
+                    if stores[store].get("eviction") == "delete":
+                        # exclusive store: per-row key under the row's scope prefix
+                        # (seed invariant: org N's project has id N)
+                        key = f"project={org_id}/{table}-{org_id}"
+                    else:
+                        # content-addressed, flat — no org in the path
+                        key = hashlib.sha1(contents.encode()).hexdigest()
                     values.append(f"'{key}'")
-                    write_blob(blobs[ref["blob"]], key, contents)
+                    write_blob(blobs[store], key, contents)
                 else:
                     values.append(str(org_id))
             print(f'INSERT INTO "{table}" ({", ".join(columns)}) VALUES ({", ".join(values)});')
