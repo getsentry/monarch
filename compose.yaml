@@ -11,5 +11,49 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
+  # PG 16+ is required for logical decoding on a standby. This avoids adding load on the primary.
+  primary:
+    image: postgres:16
+    command: ["postgres", "-c", "wal_level=logical"]
+    environment:
+      POSTGRES_USER: monarch
+      POSTGRES_PASSWORD: monarch
+      POSTGRES_DB: postgres
+    volumes:
+      - pg16_primary:/var/lib/postgresql/data
+      - ./pg16/init-replication.sh:/docker-entrypoint-initdb.d/init-replication.sh
+    ports:
+      - "5433:5432"
+
+  standby:
+    image: postgres:16
+    user: postgres
+    depends_on:
+      - primary
+    # base-backup the primary on first boot, then run as a hot standby.
+    # wal_level=logical is required on the standby too for decode-on-standby;
+    # hot_standby_feedback stops primary vacuum from invalidating standby slots.
+    entrypoint:
+      - bash
+      - -ec
+      - |
+        if [ ! -s "$$PGDATA/PG_VERSION" ]; then
+          until pg_basebackup -h primary -U monarch -D "$$PGDATA" -R -X stream; do
+            echo "waiting for primary..."; sleep 2
+          done
+        fi
+        chmod 0700 "$$PGDATA"  # volume mounts can loosen the mode; postgres refuses > 0750
+        exec postgres -c wal_level=logical -c hot_standby_feedback=on \
+          -c max_standby_streaming_delay=6h
+    environment:
+      PGDATA: /var/lib/postgresql/data
+      PGPASSWORD: monarch
+    volumes:
+      - pg16_standby:/var/lib/postgresql/data
+    ports:
+      - "5434:5432"
+
 volumes:
   pgdata:
+  pg16_primary:
+  pg16_standby:

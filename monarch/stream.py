@@ -18,7 +18,9 @@ from psycopg import Connection
 
 from .config import Config, Graph
 from .decode import Change, Commit, Decoder
-from .slot import PUBLICATION, ReplicationConnection
+from psycopg2.extras import LogicalReplicationConnection
+
+from .slot import PUBLICATION
 
 Membership = dict[str, set[int]]
 
@@ -26,7 +28,7 @@ Membership = dict[str, set[int]]
 def run_stream(
     source: Connection,
     sink: Connection,
-    repl: ReplicationConnection,
+    repl: LogicalReplicationConnection,
     slot: str,
     cfg: Config,
     membership: Membership,

@@ -6,84 +6,64 @@ SNAPSHOT and reads exactly the pre-slot state, so snapshot and stream meet at th
 consistent point: nothing missed, nothing seen by both. Duplicates now come only from crash
 re-delivery on the stream side, still absorbed by idempotent apply."""
 
-from dataclasses import dataclass
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import psycopg
 import psycopg2
 import psycopg2.extras
 from psycopg import Connection
+from psycopg2.extras import LogicalReplicationConnection
 
 # The publication pgoutput decodes through. FOR ALL TABLES: org filtering is consumer-side
 # anyway (PG14 has no publisher row filters; even PG15+ row filters can't walk the org graph).
 PUBLICATION = "monarch"
 
-ReplicationConnection = psycopg2.extras.LogicalReplicationConnection
+
+def connect_replication(dsn: str) -> LogicalReplicationConnection:
+    return psycopg2.connect(dsn, connection_factory=LogicalReplicationConnection)
 
 
-@dataclass
-class Slot:
-    """An org's replication slot plus the replication connection that creates it.
+@contextmanager
+def create_slot(dsn: str, name: str) -> Iterator[tuple[str, str]]:
+    """
+    Create the slot and yield (consistent_point, snapshot_name). The exported snapshot is
+    importable only while the creating connection stays open and idle (any other command on it,
+    even a simple SELECT 1, invalidates the name). The snapshot transaction adopts it via SET TRANSACTION
+    SNAPSHOT with at least REPEATABLE READ transaction isolation.
 
-    Guards the setup window: if anything fails between slot creation and the end of the guarded
-    block -- including the replication connection itself dying, which also kills the exported
-    snapshot -- __exit__ drops the slot so a failed snapshot never leaks one (an abandoned slot
-    pins WAL on the source until disk fills). The drop runs over a fresh regular connection,
-    since the replication connection may be the thing that died, and is best-effort: if even
-    that fails, it says so rather than pretending.
+    The slot is dropped on any exception to prevent a failed snapshot from leaking. An abandoned slot is
+    deadly since it retains WAL until the source's disk fills. The drop is best-effort over a fresh
+    connection, since the replication connection may have died at that point.
 
-    On clean exit the slot survives -- the stream resumes it later, from another process."""
-
-    dsn: str
-    name: str
-    repl: ReplicationConnection | None = None
-    created: bool = False
-
-    def __enter__(self) -> "Slot":
-        self.repl = connect_replication(self.dsn)
-        return self
-
-    @property
-    def connection(self) -> ReplicationConnection:
-        assert self.repl is not None, "use within the `with` block"
-        return self.repl
-
-    def create(self) -> tuple[str, str]:
-        """Create the slot; returns (consistent_point, snapshot_name). The exported snapshot
-        lives only while this Slot's connection stays open and idle -- keep the guarded block
-        around the whole snapshot transaction."""
-        assert self.repl is not None, "use within the `with` block"
-        with self.repl.cursor() as cur:
-            cur.execute(f'CREATE_REPLICATION_SLOT "{self.name}" LOGICAL pgoutput')
+    On clean exit the slot survives so the stream can resume it later.
+    """
+    repl = connect_replication(dsn)
+    try:
+        with repl.cursor() as cur:
+            cur.execute(f'CREATE_REPLICATION_SLOT "{name}" LOGICAL pgoutput')
             row = cur.fetchone()
             assert row is not None
-        self.created = True
         _, consistent_point, snapshot_name, _ = row
-        return consistent_point, snapshot_name
-
-    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         try:
-            if self.repl is not None:
-                self.repl.close()
-        finally:
-            if exc_type is not None and self.created:
-                self._drop_best_effort()
-
-    def _drop_best_effort(self) -> None:
-        try:
-            with psycopg.connect(self.dsn, autocommit=True) as conn:
-                drop_replication_slot(conn, self.name)
-            print(f"Cleaned up slot {self.name}")
-        except Exception as e:
-            print(
-                f"WARNING: could not drop slot {self.name} ({e}) -- drop it manually")
+            yield consistent_point, snapshot_name
+        except BaseException:
+            _drop_best_effort(dsn, name)
+            raise
+    finally:
+        repl.close()
 
 
-def connect_replication(dsn: str) -> ReplicationConnection:
-    return psycopg2.connect(dsn, connection_factory=psycopg2.extras.LogicalReplicationConnection)
+def _drop_best_effort(dsn: str, name: str) -> None:
+    try:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            drop_replication_slot(conn, name)
+        print(f"Cleaned up slot {name}")
+    except Exception as e:
+        print(f"WARNING: could not drop slot {name} ({e}) -- drop it manually")
 
 
 def ensure_publication(conn: Connection) -> None:
-    """Create the publication if missing (CREATE PUBLICATION has no IF NOT EXISTS)."""
     exists = conn.execute(
         "SELECT 1 FROM pg_publication WHERE pubname = %s", (PUBLICATION,)
     ).fetchone()

@@ -1,6 +1,8 @@
 import argparse
 import json
+import os
 import sys
+from contextlib import closing
 
 import psycopg
 
@@ -9,8 +11,12 @@ from .config import Config, load_config
 from .snapshot import run_snapshot
 from .stream import Membership, run_stream
 
-SOURCE_DSN = "host=127.0.0.1 port=5432 user=monarch password=monarch dbname=source"
-SINK_DSN = "host=127.0.0.1 port=5432 user=monarch password=monarch dbname=sink"
+SOURCE_DSN = os.environ.get(
+    "MONARCH_SOURCE_DSN", "host=127.0.0.1 port=5432 user=monarch password=monarch dbname=source"
+)
+SINK_DSN = os.environ.get(
+    "MONARCH_SINK_DSN", "host=127.0.0.1 port=5432 user=monarch password=monarch dbname=sink"
+)
 CONFIG = "postgres_config.yaml"
 
 
@@ -50,21 +56,20 @@ def cmd_snapshot(org_id: int, cfg: Config) -> None:
     # outlive the snapshot transaction, and a failure anywhere inside drops the slot (slot.py).
     with connect(SOURCE_DSN) as source, connect(SINK_DSN) as sink:
         slot.ensure_publication(source)
-        with slot.Slot(SOURCE_DSN, slot_name(org_id)) as s:
-            lsn, snapshot = s.create()
-            print(f"slot {s.name} created at LSN {lsn} (snapshot {snapshot})\n")
+        with slot.create_slot(SOURCE_DSN, slot_name(org_id)) as (lsn, snapshot):
+            print(f"slot {slot_name(org_id)} created at LSN {lsn} (snapshot {snapshot})\n")
             membership = run_snapshot(source, sink, cfg, org_id, snapshot)
             save_membership(org_id, membership)
             print(f"\nmembership saved to {membership_path(org_id)}")
 
 
 def cmd_stream(org_id: int, cfg: Config) -> None:
-    # Resumes the slot the snapshot created -- the stream never calls create(), so the Slot guard
-    # exits with created=False and the slot survives any crash for the next restart to resume.
+    # Resumes the slot the snapshot created -- the stream never creates or drops one, so it can
+    # crash and restart freely; the slot survives for the next resume.
     membership = load_membership(org_id)
     with connect(SOURCE_DSN) as source, connect(SINK_DSN) as sink:
-        with slot.Slot(SOURCE_DSN, slot_name(org_id)) as s:
-            run_stream(source, sink, s.connection, slot_name(org_id), cfg, membership)
+        with closing(slot.connect_replication(SOURCE_DSN)) as repl:
+            run_stream(source, sink, repl, slot_name(org_id), cfg, membership)
 
 
 def main() -> None:
