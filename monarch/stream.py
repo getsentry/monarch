@@ -8,7 +8,10 @@ from another), so the streams share one Scope. Per stream, changes are buffered 
 transaction and applied inside sink transactions at the Commit marker, so the sink only ever
 shows states the source actually had. Apply stays idempotent (upsert / delete-if-present) for
 crash re-delivery: feedback is sent only at applied commit boundaries, so a restart replays
-whole transactions since that stream's last flushed LSN.
+whole transactions since that stream's last flushed LSN. Apply is deliberately serial within
+a stream: upsert convergence depends on source commit order ("last write wins" is only correct
+when "last" is the source's last), so each slot is one ordered pipe -- the design is only
+parallel across databases not on a single stream.
 
 TailFilter is the perf seam: decode + scope decision + membership maintenance behind one
 filter_batch call, so a native implementation can replace it wholesale if the tail can't keep
@@ -19,7 +22,7 @@ import select
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from psycopg import Connection
+from psycopg import Connection, sql
 
 from .config import Cell, Database, Graph
 from .decode import Change, Commit, Decoder
@@ -198,26 +201,57 @@ class TailFilter:
         return out
 
 
+def cast_to(type_name: str) -> sql.SQL:
+    """The sink-side cast target for a column's text value. Type names come from the source
+    db's own catalog (Relation messages), not users -- the one runtime-built SQL fragment
+    here; identifiers go through sql.Identifier and values through parameters."""
+    return sql.SQL(type_name)  # pyright: ignore[reportArgumentType]
+
+
 def apply_change(sink: Connection, change: Change) -> None:
     """Execute one in-scope change on the sink."""
-    # psycopg's types reject runtime-built SQL strings; ignored here since the interpolated
-    # table/column names come from the source db's own catalog (Relation messages), not users.
     row_id = change.get_int("id")
+    table = sql.Identifier(change.table)
     if change.op == "DELETE":
-        delete = f'DELETE FROM "{change.table}" WHERE id = %s'
-        n = sink.execute(delete, (row_id,)).rowcount  # pyright: ignore[reportArgumentType]
-        if n == 0:
+        delete = sql.SQL("DELETE FROM {} WHERE id = %s").format(table)
+        if sink.execute(delete, (row_id,)).rowcount == 0:
             return  # already gone: matched nothing, don't log it
+    elif change.partial:
+        # Unchanged TOAST columns were omitted: cols is not the full row, so the upsert's
+        # INSERT arm would fabricate a row missing them. Update-only; a missing row is an
+        # integrity error -- the exported-snapshot seam plus ack-after-apply guarantee the
+        # sink already holds the full row. (NOT true for a chunked snapshot, where snapshot
+        # and stream interleave: this guard does not port to that design.)
+        data = [c for c in change.cols if c.name != "id"]
+        if not data:
+            return  # only unchanged columns: nothing to apply
+        updates = sql.SQL(", ").join(
+            sql.SQL("{} = %s::text::{}").format(sql.Identifier(c.name), cast_to(c.type_name))
+            for c in data
+        )
+        update = sql.SQL("UPDATE {} SET {} WHERE id = %s").format(table, updates)
+        if sink.execute(update, [c.value for c in data] + [row_id]).rowcount == 0:
+            raise RuntimeError(
+                f"partial {change.table} change for id={row_id} but the sink has no row --"
+                " refusing to fabricate a row missing its TOAST columns"
+            )
     else:
-        names = ", ".join(f'"{c.name}"' for c in change.cols)
-        values = ", ".join(f"%s::text::{c.ty}" for c in change.cols)
-        updates = ", ".join(
-            f'"{c.name}" = EXCLUDED."{c.name}"' for c in change.cols if c.name != "id"
+        names = sql.SQL(", ").join(sql.Identifier(c.name) for c in change.cols)
+        values = sql.SQL(", ").join(
+            sql.SQL("%s::text::{}").format(cast_to(c.type_name)) for c in change.cols
         )
-        action = f"UPDATE SET {updates}" if updates else "NOTHING"
-        sql = (
-            f'INSERT INTO "{change.table}" ({names}) VALUES ({values})'
-            f" ON CONFLICT (id) DO {action}"
+        updates = sql.SQL(", ").join(
+            sql.SQL("{} = EXCLUDED.{}").format(sql.Identifier(c.name), sql.Identifier(c.name))
+            for c in change.cols
+            if c.name != "id"
         )
-        sink.execute(sql, [c.value for c in change.cols])  # pyright: ignore[reportArgumentType]
+        action = (
+            sql.SQL("UPDATE SET {}").format(updates)
+            if len(change.cols) > 1
+            else sql.SQL("NOTHING")
+        )
+        insert = sql.SQL("INSERT INTO {} ({}) VALUES ({}) ON CONFLICT (id) DO {}").format(
+            table, names, values, action
+        )
+        sink.execute(insert, [c.value for c in change.cols])
     print(f"  {change.op:<6} {change.table:<16} id={row_id}  ->  sink")

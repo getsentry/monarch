@@ -28,7 +28,7 @@ _U32 = struct.Struct(">I")
 @dataclass
 class Column:
     name: str
-    ty: str  # sink-side cast target, resolved from the Relation message's type oid
+    type_name: str  # sink-side cast target, resolved from the Relation message's type oid
     value: str | None  # the type's text output; None is SQL NULL
 
 
@@ -37,6 +37,7 @@ class Change:
     table: str
     op: Op
     cols: list[Column]
+    partial: bool = False  # an unchanged TOAST column was omitted: cols is not the full row
 
     def get(self, name: str) -> str | None:
         for c in self.cols:
@@ -98,18 +99,21 @@ class Decoder:
         if kind == ord("I"):
             rel = self._relation(b.u32())
             b.u8()  # 'N'
-            return Change(rel.table, "INSERT", self._read_tuple(rel, b))
+            cols, _ = self._read_tuple(rel, b)  # inserts always carry the full row
+            return Change(rel.table, "INSERT", cols)
         if kind == ord("U"):
             rel = self._relation(b.u32())
             if b.peek() in (ord("K"), ord("O")):
                 b.u8()
                 self._read_tuple(rel, b)  # old key/row: consumed, unused
             b.u8()  # 'N'
-            return Change(rel.table, "UPDATE", self._read_tuple(rel, b))
+            cols, partial = self._read_tuple(rel, b)
+            return Change(rel.table, "UPDATE", cols, partial)
         if kind == ord("D"):
             rel = self._relation(b.u32())
             b.u8()  # 'K' (key only, default replica identity) or 'O' (full old row)
-            return Change(rel.table, "DELETE", self._read_tuple(rel, b))
+            cols, _ = self._read_tuple(rel, b)  # key tuples carry no TOAST to omit
+            return Change(rel.table, "DELETE", cols)
         if kind == ord("C"):
             return Commit()
         if kind in b"BOTM":  # begin/origin/truncate/message
@@ -121,22 +125,24 @@ class Decoder:
             raise ValueError(f"change for unannounced relation {rel_id}")
         return rel
 
-    def _read_tuple(self, rel: _Relation, b: "_Buf") -> list[Column]:
-        """TupleData: per column 'n' (null), 'u' (unchanged TOAST -- omitted, so the upsert leaves
-        the sink's copy of it alone) or 't' (the type's text output, length-prefixed)."""
+    def _read_tuple(self, rel: _Relation, b: "_Buf") -> tuple[list[Column], bool]:
+        """TupleData: per column 'n' (null), 'u' (unchanged TOAST -- omitted, marking the change
+        partial: apply must update the sink's row, never fabricate one) or 't' (the type's text
+        output, length-prefixed)."""
         cols = []
+        partial = False
         for i in range(b.u16()):
-            name, ty = rel.columns[i]
+            name, type_name = rel.columns[i]
             k = b.u8()
             if k == ord("n"):
-                cols.append(Column(name, ty, None))
+                cols.append(Column(name, type_name, None))
             elif k == ord("u"):
-                continue
+                partial = True
             elif k == ord("t"):
-                cols.append(Column(name, ty, b.bytes(b.u32()).decode()))
+                cols.append(Column(name, type_name, b.bytes(b.u32()).decode()))
             else:
                 raise ValueError(f"unsupported tuple data kind {chr(k)!r}")
-        return cols
+        return cols, partial
 
 
 class _Buf:

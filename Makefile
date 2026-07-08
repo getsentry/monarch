@@ -5,9 +5,8 @@ COMPOSE := docker compose
 PSQL := $(COMPOSE) exec -T postgres psql -U monarch -v ON_ERROR_STOP=1 -q
 SOURCE_PSQL := $(COMPOSE) exec -T primary psql -U monarch -v ON_ERROR_STOP=1 -q
 
-.PHONY: up down install databases schema data reset demo demo-toast-corruption snapshot \
-	evict-source evict-sink psql-source psql-standby psql-files psql-sink \
-	rust-schema rust-data demo-rs
+.PHONY: up down install databases schema data reset demo snapshot evict-source evict-sink \
+	psql-source psql-standby psql-files psql-sink rust-schema rust-data demo-rs
 
 up:
 	$(COMPOSE) up -d
@@ -84,20 +83,6 @@ demo:
 	@$(SOURCE_PSQL) -d source -c "SELECT 'source' AS side, left(message, 20) AS message_head, length(message) FROM commit WHERE id = 1"
 	@$(PSQL) -d sink -c "SELECT 'sink' AS side, left(message, 20) AS message_head, length(message) FROM commit WHERE id = 1"
 
-
-demo-toast-corruption:
-	@( for i in $$(seq 1 15); do sleep 1; $(SOURCE_PSQL) -d postgres -c "SELECT pg_log_standby_snapshot()" >/dev/null 2>&1; done ) &
-	$(SOURCE_PSQL) -d source -c "UPDATE commit SET message = 'BIG-TOASTED-MESSAGE:' || (SELECT string_agg(md5(random()::text), '') FROM generate_series(1, 5000)) WHERE id = 1"
-	uv run monarch snapshot --org-id $(ORG)
-	@echo "== fault injection: deleting the commit row from the SINK only (faking a gap)"
-	$(PSQL) -d sink -c "DELETE FROM commit WHERE id = 1"
-	@echo "== no-touch update on the source: the unchanged 160KB message is omitted from its WAL image"
-	$(SOURCE_PSQL) -d source -c "UPDATE commit SET organization_id = 1 WHERE id = 1"
-	PYTHONUNBUFFERED=1 uv run monarch stream --org-id $(ORG) & PID=$$!; sleep 5; kill $$PID 2>/dev/null || true
-	uv run monarch drop-slot --org-id $(ORG)
-	@echo "== source vs sink: the source keeps its message; the sink row was recreated WITHOUT it (the bug)"
-	@$(SOURCE_PSQL) -d source -c "SELECT 'source' AS side, left(message, 20) AS message_head, length(message) FROM commit WHERE id = 1"
-	@$(PSQL) -d sink -c "SELECT 'sink' AS side, left(message, 20) AS message_head, length(message), message IS NULL AS corrupted FROM commit WHERE id = 1"
 
 # Eviction (refuses while the org's slots still exist -- a live stream would replicate the
 # deletes to the sink). evict-source = post-cutover cleanup, the org has moved; evict-sink =
