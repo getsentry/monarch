@@ -1,5 +1,5 @@
 /target
-mock_storages/filestore/
+mock_storages/buckets/
 .venv/
 __pycache__/
 .DS_Store

@@ -38,4 +38,4 @@ relationships:
 blobs:
   filestore:
     store: gcs_mock
-    file_path: mock_storages/filestore
+    file_path: mock_storages/buckets/filestore

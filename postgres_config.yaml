@@ -18,36 +18,104 @@ stores:
   # (in objectstore's attachments in production a retention TTL also exists as a backstop)
   attachment_blobs: { type: blob_store, eviction: delete }
 
-# table -> store placement + the scoping edges. `store` is a reserved key; the rest are columns.
+# `project` is marked as frozen. This means no project creation or deletion for the org
+# being moved. This is because `project` is the reference used across multiple storage systems
+# - making it frozen makes the cross-store edge free of race conditions.
 relationships:
-  organization:    { store: default }
-  project:         { store: default, organization_id: { parent: organization } }
-  group:           { store: default, project_id: { parent: project } }
+  organization:
+    store: default
 
-  # Org project columns exist here but are nullable, group_id is always present
-  groupinbox:      { store: default, organization_id: { parent: organization, nullable: true }, project_id: { parent: project, nullable: true }, group_id: { parent: group } }
-  promptsactivity: { store: default, organization_id: { parent: organization }, project_id: { parent: project } }
-  eventattachment: { store: attachments, project_id: { parent: project }, group_id: { parent: group, nullable: true }, blob_path: { blob: attachment_blobs } }
+  project:
+    store: default
+    frozen: true
+    refs:
+      organization_id: { parent: organization }
+
+  group:
+    store: default
+    refs:
+      project_id: { parent: project }
+
+  # Org and project columns exist here but are nullable, group_id is always present
+  groupinbox:
+    store: default
+    refs:
+      organization_id: { parent: organization, nullable: true }
+      project_id:      { parent: project, nullable: true }
+      group_id:        { parent: group }
+
+  promptsactivity:
+    store: default
+    refs:
+      organization_id: { parent: organization }
+      project_id:      { parent: project }
+
+  eventattachment:
+    store: attachments
+    refs:
+      project_id: { parent: project }
+      group_id:   { parent: group, nullable: true }
+      blob_path:  { blob: attachment_blobs }
 
   # Carries both group and project
-  groupassignee:   { store: default, group_id: { parent: group }, project_id: { parent: project } }
-  grouprelease:    { store: default, group_id: { parent: group }, project_id: { parent: project } }
+  groupassignee:
+    store: default
+    refs:
+      group_id:   { parent: group }
+      project_id: { parent: project }
+
+  grouprelease:
+    store: default
+    refs:
+      group_id:   { parent: group }
+      project_id: { parent: project }
+
   # project_id is stable as group_id can be null or changed on merge/unmerge
-  grouphash:       { store: default, project_id: { parent: project }, group_id: { parent: group, nullable: true } }
+  grouphash:
+    store: default
+    refs:
+      project_id: { parent: project }
+      group_id:   { parent: group, nullable: true }
 
   # implicit foreign key without actual DB constraint, but we handle it all the same
-  commit:          { store: default, organization_id: { parent: organization } }
+  commit:
+    store: default
+    refs:
+      organization_id: { parent: organization }
 
   # these are HybridCloudForeighKey in Sentry, it's just a regular reference to us
-  apikey:          { store: default, organization_id: { parent: organization } }
-  orgauthtoken:    { store: default, organization_id: { parent: organization } }
+  apikey:
+    store: default
+    refs:
+      organization_id: { parent: organization }
+
+  orgauthtoken:
+    store: default
+    refs:
+      organization_id: { parent: organization }
 
   # Org ID is nullable, check if it's reliable otherwise scope by group_id instead
-  groupredirect:   { store: default, organization_id: { parent: organization, nullable: true }, group_id: { parent: group } }
+  groupredirect:
+    store: default
+    refs:
+      organization_id: { parent: organization, nullable: true }
+      group_id:        { parent: group }
 
-  release:         { store: default, organization_id: { parent: organization } }
+  release:
+    store: default
+    refs:
+      organization_id: { parent: organization }
+
   # many to many relationship, we can go through release or project
-  releaseproject:  { store: default, release_id: { parent: release }, project_id: { parent: project } }
+  releaseproject:
+    store: default
+    refs:
+      release_id: { parent: release }
+      project_id: { parent: project }
 
   # files table that references an external blob storage
-  file:            { store: files, project_id: { parent: project }, path: { blob: filestore } }
+  file:
+    store: files
+    refs:
+      project_id: { parent: project }
+      path:       { blob: filestore }

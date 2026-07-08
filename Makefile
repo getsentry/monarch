@@ -47,7 +47,7 @@ reset:
 	$(SOURCE_PSQL) -d postgres -c "DROP DATABASE IF EXISTS source"
 	$(SOURCE_PSQL) -d postgres -c "DROP DATABASE IF EXISTS source_files"
 	$(PSQL) -d postgres -c "DROP DATABASE IF EXISTS sink"
-	rm -rf mock_storages/filestore mock_storages/attachment_blobs membership_org_*.json
+	rm -rf mock_storages/buckets membership_org_*.json
 
 psql-source:
 	$(COMPOSE) exec primary psql -U monarch -d source

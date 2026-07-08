@@ -47,9 +47,10 @@ def main() -> None:
                     store = ref["blob"]
                     contents = f"dummy blob for {org_name} {table}\n"
                     if store_config[store].get("eviction") == "delete":
-                        # exclusive store: per-row key under the row's scope prefix
-                        # (seed invariant: org N's project has id N)
-                        key = f"project={org_id}/{table}-{org_id}"
+                        # exclusive store: per-row key under the row's project scope.
+                        # The seed gives org N's project and each of its rows id N.
+                        project_id = row_id = org_id
+                        key = f"project={project_id}/{table}-{row_id}"
                     else:
                         # content-addressed, flat — no org in the path
                         key = hashlib.sha1(contents.encode()).hexdigest()

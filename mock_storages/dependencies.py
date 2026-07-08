@@ -6,7 +6,7 @@ CONFIG = os.path.join(os.path.dirname(__file__), "..", "postgres_config.yaml")
 FLEET = os.path.join(os.path.dirname(__file__), "..", "fleet.yaml")
 
 # table -> {column -> ref}, where ref is {"parent": table} (FK edge) or {"blob": store} (blob key).
-# The root maps to {}. The manifest's reserved `store` key is stripped: placement is not a column.
+# The root maps to {}.
 Tables = dict[str, dict[str, dict]]
 
 
@@ -19,7 +19,7 @@ def load_from_config() -> tuple[str, Tables, dict[str, str]]:
     tables: Tables = {root: {}}
     store_of: dict[str, str] = {}
     for table, spec in cfg["relationships"].items():
-        cols = {c: ref for c, ref in spec.items() if c != "store"}
+        cols = spec.get("refs", {})
         tables[table] = cols
         store_of[table] = spec["store"]
         for ref in cols.values():

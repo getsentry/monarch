@@ -43,6 +43,7 @@ class Graph:
     store_of: dict[str, str]  # table -> logical store name
     edges: dict[str, list[Edge]]  # table -> parent edges
     blobs: dict[str, dict[str, str]]  # table -> blob column -> blob store name
+    frozen: frozenset[str]  # tables whose structural writes pause during a move
 
     @cached_property
     def parents(self) -> set[str]:
@@ -62,6 +63,27 @@ class Graph:
         one edge fully scopes the table. None for the root or a table with no such edge. Shared
         by the snapshot's predicates and the stream's row-level admit check."""
         return next((e for e in self.edges.get(table, []) if not e.nullable), None)
+
+    def validate(self) -> None:
+        for table, store in self.store_of.items():
+            if not isinstance(self.stores.get(store), PostgresStore):
+                raise ValueError(f"{table}: store {store!r} is not a postgres store")
+        for table, columns in self.blobs.items():
+            for column, store in columns.items():
+                if not isinstance(self.stores.get(store), BlobStore):
+                    raise ValueError(f"{table}.{column}: {store!r} is not a blob store")
+        # A scope edge may cross stores only into a frozen table (or the root, static by
+        # nature): same-store edges are ordered by WAL, cross-store ones only by the freeze.
+        # Anything else is a membership race the moment a cell splits the two stores.
+        for table in self.edges:
+            edge = self.scope_edge(table)
+            if edge is None or edge.parent in (self.root, *self.frozen):
+                continue
+            if self.store_of[table] != self.store_of[edge.parent]:
+                raise ValueError(
+                    f"{table}: scope edge {edge.column} crosses stores to unfrozen"
+                    f" {edge.parent!r} -- colocate them or freeze the parent"
+                )
 
 
 def load_graph(path: str) -> Graph:
@@ -83,22 +105,28 @@ def load_graph(path: str) -> Graph:
     store_of: dict[str, str] = {}
     edges: dict[str, list[Edge]] = {}
     blobs: dict[str, dict[str, str]] = {}
+    frozen: set[str] = set()
     for table, spec in raw["relationships"].items():
         store_of[table] = spec["store"]
-        if not isinstance(stores.get(spec["store"]), PostgresStore):
-            raise ValueError(f"{table}: store {spec['store']!r} is not a postgres store")
-        for column, ref in spec.items():
-            if column == "store":
-                continue  # reserved key: placement, not a column
+        if spec.get("frozen"):
+            frozen.add(table)
+        for column, ref in spec.get("refs", {}).items():
             if "parent" in ref:
                 edges.setdefault(table, []).append(
                     Edge(column, ref["parent"], ref.get("nullable", False))
                 )
             elif "blob" in ref:
-                if not isinstance(stores.get(ref["blob"]), BlobStore):
-                    raise ValueError(f"{table}.{column}: {ref['blob']!r} is not a blob store")
                 blobs.setdefault(table, {})[column] = ref["blob"]
-    return Graph(root=raw["root"], stores=stores, store_of=store_of, edges=edges, blobs=blobs)
+    graph = Graph(
+        root=raw["root"],
+        stores=stores,
+        store_of=store_of,
+        edges=edges,
+        blobs=blobs,
+        frozen=frozenset(frozen),
+    )
+    graph.validate()
+    return graph
 
 
 @dataclass(frozen=True)

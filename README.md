@@ -29,7 +29,7 @@ This repo aims to prototype two things:
   something concrete to run against (`mock_storages/`). There is a Postgres schema with
   org -> project -> group (and other) foreign-key relationships seeded from the config, and
   an external blob store referenced by path on the `files` table, mocked on the filesystem
-  under `mock_storages/filestore/`.
+  under `mock_storages/buckets/filestore/`.
 - **Source and sink storages:** `source` is the cell the org lives on; `sink` is the destination it
   moves to (starts empty). Both are separate Postgres databases on the same instance. The source and
   sink filestores are in their own folders. The move seeds the source side; the sink starts empty and
