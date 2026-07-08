@@ -83,7 +83,7 @@ relationships:
     refs:
       organization_id: { parent: organization }
 
-  # these are HybridCloudForeighKey in Sentry, it's just a regular reference to us
+  # these are HybridCloudForeignKey in Sentry, it's just a regular reference to us
   apikey:
     store: default
     refs:

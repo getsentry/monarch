@@ -15,6 +15,8 @@ def main() -> None:
         if stores and store_of[t] not in stores:
             continue
         cols = ["id bigserial PRIMARY KEY"] + (["name text"] if t == root else [])
+        if t == "commit":
+            cols.append("message text")  # big-value column so the demo can exercise TOAST
         for column, ref in tables[t].items():
             cols.append(f"{column} {'text' if 'blob' in ref else 'bigint'}")
         print(f'CREATE TABLE "{t}" ({", ".join(cols)});')
