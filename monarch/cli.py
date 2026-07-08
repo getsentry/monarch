@@ -9,7 +9,7 @@ import psycopg
 
 from . import slot
 from .blobs import Bucket, copy_blob
-from .config import Cell, Database, Graph, load_cells, load_graph
+from .config import BlobStore, Cell, Database, Graph, load_config
 from .cell_eviction import run_evict
 from .snapshot import Source, run_snapshot
 from .stream import Membership, StreamSource, run_streams
@@ -55,7 +55,7 @@ def blob_copiers(graph: Graph, source: Cell, sink: Cell) -> dict[str, Callable[[
         name: partial(copy_blob, Bucket(source.blobs[name]["file_path"]),
                       Bucket(sink.blobs[name]["file_path"]))
         for name, store in graph.stores.items()
-        if store.type == "blob_store"
+        if isinstance(store, BlobStore)
     }
 
 
@@ -128,8 +128,7 @@ def main() -> None:
     p.add_argument("--cell", default="source", help="cell to evict the org from (fleet.yaml)")
     args = parser.parse_args()
 
-    graph = load_graph(CONFIG)
-    cells = load_cells(FLEET)
+    graph, cells = load_config(CONFIG, FLEET)
     match args.cmd:
         case "snapshot":
             cmd_snapshot(args.org_id, graph, cells[args.source], cells[args.sink])

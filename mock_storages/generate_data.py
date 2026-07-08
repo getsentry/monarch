@@ -27,7 +27,7 @@ def main() -> None:
     with open(FLEET) as f:
         blobs = yaml.safe_load(f)["cells"]["source"]["blobs"]
     with open(CONFIG) as f:
-        stores = yaml.safe_load(f)["stores"]
+        store_config = yaml.safe_load(f)["stores"]
     root, tables, store_of = load_from_config()
     stores = set(sys.argv[1:])  # no args = all stores
     sorted_tables = topological_sort(root, tables)
@@ -46,7 +46,7 @@ def main() -> None:
                 if "blob" in ref:
                     store = ref["blob"]
                     contents = f"dummy blob for {org_name} {table}\n"
-                    if stores[store].get("eviction") == "delete":
+                    if store_config[store].get("eviction") == "delete":
                         # exclusive store: per-row key under the row's scope prefix
                         # (seed invariant: org N's project has id N)
                         key = f"project={org_id}/{table}-{org_id}"

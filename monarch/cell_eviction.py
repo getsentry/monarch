@@ -14,7 +14,7 @@ from contextlib import ExitStack
 from psycopg import Connection, sql
 
 from .blobs import Bucket, delete_blob
-from .config import Cell, Graph
+from .config import BlobStore, Cell, Graph
 from .snapshot import scope_predicate
 
 
@@ -49,7 +49,8 @@ def run_evict(
         # for a doomed copy; the rerun's object deletes are no-ops and the rows still go.
         for table, pred in scoped:
             for column, store in graph.blobs.get(table, {}).items():
-                if graph.stores[store].eviction != "delete":
+                blob_store = graph.stores[store]
+                if not isinstance(blob_store, BlobStore) or blob_store.eviction != "delete":
                     continue  # keep: the owning service's GC reclaims after the rows go
                 blob_keys = sql.SQL("SELECT DISTINCT {c} FROM {t} WHERE {p} AND {c} IS NOT NULL").format(
                     c=sql.Identifier(column), t=sql.Identifier(table), p=pred

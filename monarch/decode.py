@@ -15,8 +15,11 @@ use cases.
 
 import struct
 from dataclasses import dataclass
+from typing import Literal
 
 from psycopg import Connection
+
+Op = Literal["INSERT", "UPDATE", "DELETE"]
 
 _U16 = struct.Struct(">H")
 _U32 = struct.Struct(">I")
@@ -32,7 +35,7 @@ class Column:
 @dataclass
 class Change:
     table: str
-    op: str  # INSERT | UPDATE | DELETE
+    op: Op
     cols: list[Column]
 
     def get(self, name: str) -> str | None:

@@ -4,30 +4,37 @@ database physically hosts each logical store (big cells split stores across clus
 cells colocate several in one database)."""
 
 import graphlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from functools import cached_property
 from typing import Literal
 
 import yaml
 
-StoreType = Literal["postgres", "blob_store"]
 Eviction = Literal["delete", "keep"]
 
 
-@dataclass
-class Store:
+@dataclass(frozen=True)
+class PostgresStore:
     name: str
-    type: StoreType
-    eviction: Eviction | None = None  # blob stores only: does eviction delete the org's objects?
 
 
-@dataclass
+@dataclass(frozen=True)
+class BlobStore:
+    name: str
+    eviction: Eviction  # delete = eviction removes the org's objects; keep = a reclaimer exists
+
+
+Store = PostgresStore | BlobStore
+
+
+@dataclass(frozen=True)
 class Edge:
     column: str
     parent: str
     nullable: bool
 
 
-@dataclass
+@dataclass(frozen=True)
 class Graph:
     """The org-scoping graph plus store placement, loaded from the manifest."""
 
@@ -36,10 +43,11 @@ class Graph:
     store_of: dict[str, str]  # table -> logical store name
     edges: dict[str, list[Edge]]  # table -> parent edges
     blobs: dict[str, dict[str, str]]  # table -> blob column -> blob store name
-    parents: set[str] = field(init=False)  # tables something references as a parent
 
-    def __post_init__(self) -> None:
-        self.parents = {e.parent for edges in self.edges.values() for e in edges}
+    @cached_property
+    def parents(self) -> set[str]:
+        """Tables something references as a parent."""
+        return {e.parent for edges in self.edges.values() for e in edges}
 
     def topological_sort(self) -> list[str]:
         """Tables in dependency order, root first: every table follows the tables it references."""
@@ -61,19 +69,24 @@ def load_graph(path: str) -> Graph:
         raw = yaml.safe_load(f)
     stores: dict[str, Store] = {}
     for name, meta in raw["stores"].items():
-        if meta["type"] not in ("postgres", "blob_store"):
-            raise ValueError(f"store {name}: unknown type {meta['type']!r}")
-        eviction = meta.get("eviction")
-        if meta["type"] == "blob_store" and eviction not in ("delete", "keep"):
-            raise ValueError(f"store {name}: blob stores need eviction: delete|keep, got {eviction!r}")
-        if meta["type"] == "postgres" and eviction is not None:
-            raise ValueError(f"store {name}: eviction only applies to blob stores")
-        stores[name] = Store(name, meta["type"], eviction)
+        match meta["type"]:
+            case "postgres":
+                stores[name] = PostgresStore(name)
+            case "blob_store":
+                if (eviction := meta["eviction"]) not in ("delete", "keep"):
+                    raise ValueError(
+                        f"store {name}: eviction must be delete|keep, got {eviction!r}"
+                    )
+                stores[name] = BlobStore(name, eviction)
+            case unknown:
+                raise ValueError(f"store {name}: unknown type {unknown!r}")
     store_of: dict[str, str] = {}
     edges: dict[str, list[Edge]] = {}
     blobs: dict[str, dict[str, str]] = {}
     for table, spec in raw["relationships"].items():
         store_of[table] = spec["store"]
+        if not isinstance(stores.get(spec["store"]), PostgresStore):
+            raise ValueError(f"{table}: store {spec['store']!r} is not a postgres store")
         for column, ref in spec.items():
             if column == "store":
                 continue  # reserved key: placement, not a column
@@ -82,11 +95,13 @@ def load_graph(path: str) -> Graph:
                     Edge(column, ref["parent"], ref.get("nullable", False))
                 )
             elif "blob" in ref:
+                if not isinstance(stores.get(ref["blob"]), BlobStore):
+                    raise ValueError(f"{table}.{column}: {ref['blob']!r} is not a blob store")
                 blobs.setdefault(table, {})[column] = ref["blob"]
     return Graph(root=raw["root"], stores=stores, store_of=store_of, edges=edges, blobs=blobs)
 
 
-@dataclass
+@dataclass(frozen=True)
 class Database:
     dsn: str
     stores: list[str]
@@ -100,7 +115,7 @@ class Database:
         return [t for t in graph.topological_sort() if graph.store_of[t] in self.stores]
 
 
-@dataclass
+@dataclass(frozen=True)
 class Cell:
     name: str
     databases: list[Database]
@@ -108,6 +123,11 @@ class Cell:
 
     def dsn_for(self, store: str) -> str:
         return next(db.dsn for db in self.databases if store in db.stores)
+
+    def validate(self, graph: Graph) -> None:
+        """TODO: check this cell against the manifest so a bad fleet.yaml fails at startup
+        instead of as a KeyError mid-move: every postgres store placed in exactly one of the
+        cell's databases, only postgres stores in placements, every blob store located."""
 
 
 def load_cells(path: str) -> dict[str, Cell]:
@@ -121,3 +141,14 @@ def load_cells(path: str) -> dict[str, Cell]:
         )
         for name, c in raw["cells"].items()
     }
+
+
+def load_config(manifest_path: str, fleet_path: str) -> tuple[Graph, dict[str, Cell]]:
+    """
+    Load manifest and fleet configs and cross-validate: a fleet is only fully valid relative to a manifest.
+    """
+    graph = load_graph(manifest_path)
+    cells = load_cells(fleet_path)
+    for cell in cells.values():
+        cell.validate(graph)
+    return graph, cells

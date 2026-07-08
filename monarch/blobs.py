@@ -6,13 +6,14 @@ objects per key at eviction (cell_eviction.py)."""
 
 import os
 import shutil
+from dataclasses import dataclass
 
 
+@dataclass(frozen=True)
 class Bucket:
     """One cell's blob bucket. The demo backs it with a local directory (fleet.yaml file_path)."""
 
-    def __init__(self, root: str) -> None:
-        self.root = root
+    root: str
 
     def path(self, key: str) -> str:
         return os.path.join(self.root, key)
