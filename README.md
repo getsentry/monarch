@@ -18,7 +18,10 @@ them togther.
 
 This repo aims to prototype two things:
 1. the per-store move itself — snapshot, stream, blob copy - such that no records are missed
-2. the coordination layer that maps the relationships between stores and migrates them together
+2. how consistency is preserved across stores with no single WAL
+
+**▶ [The lifecycle of a move](https://getsentry.github.io/monarch/move-lifecycle.html)** —
+an interactive walkthrough of the end-to-end process.
 
 ## How it works
 
