@@ -6,7 +6,7 @@ PSQL := $(COMPOSE) exec -T postgres psql -U monarch -v ON_ERROR_STOP=1 -q
 SOURCE_PSQL := $(COMPOSE) exec -T primary psql -U monarch -v ON_ERROR_STOP=1 -q
 
 .PHONY: up down install databases schema data reset demo verify snapshot opt-in-group \
-	evict-source evict-sink psql-source psql-standby psql-files psql-sink \
+	evict-source evict-sink psql-source psql-standby psql-files psql-sink psql-ledger \
 	rust-schema rust-data demo-rs
 
 up:
@@ -18,11 +18,14 @@ down:
 install:
 	uv sync
 
-# The fleet's databases (fleet.yaml): source + source_files on the pair, sink in the sink cell
+# The fleet's databases (fleet.yaml): source + source_files on the pair, sink + monarch_ledger
+# on the pg14 instance (the ledger = monarch's own move state; colocation is demo convenience,
+# not design -- in production this role belongs to the control silo)
 databases:
 	@$(SOURCE_PSQL) -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='source'" | grep -q 1 || $(SOURCE_PSQL) -d postgres -c "CREATE DATABASE source"
 	@$(SOURCE_PSQL) -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='source_files'" | grep -q 1 || $(SOURCE_PSQL) -d postgres -c "CREATE DATABASE source_files"
 	@$(PSQL) -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='sink'"   | grep -q 1 || $(PSQL) -d postgres -c "CREATE DATABASE sink"
+	@$(PSQL) -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='monarch_ledger'" | grep -q 1 || $(PSQL) -d postgres -c "CREATE DATABASE monarch_ledger"
 
 # Each source database gets only its stores' tables, mirroring fleet.yaml; the sink colocates
 # every store so it gets them all. Publications are per-org and created by `monarch snapshot`
@@ -32,6 +35,7 @@ schema: databases
 	-uv run python mock_storages/generate_schema.py default attachments | $(SOURCE_PSQL) -d source
 	-uv run python mock_storages/generate_schema.py files | $(SOURCE_PSQL) -d source_files
 	-uv run python mock_storages/generate_schema.py | $(PSQL) -d sink
+	$(PSQL) -d monarch_ledger < monarch/migrations/ledger.sql
 
 # Seed the source cell's databases (and the mock filestore) with example data
 data:
@@ -46,6 +50,7 @@ reset:
 	$(SOURCE_PSQL) -d postgres -c "DROP DATABASE IF EXISTS source"
 	$(SOURCE_PSQL) -d postgres -c "DROP DATABASE IF EXISTS source_files"
 	$(PSQL) -d postgres -c "DROP DATABASE IF EXISTS sink"
+	$(PSQL) -d postgres -c "DROP DATABASE IF EXISTS monarch_ledger"
 	rm -rf mock_storages/buckets membership_org_*.json
 
 psql-source:
@@ -56,6 +61,8 @@ psql-files:
 	$(COMPOSE) exec primary psql -U monarch -d source_files
 psql-sink:
 	$(COMPOSE) exec postgres psql -U monarch -d sink
+psql-ledger:
+	$(COMPOSE) exec postgres psql -U monarch -d monarch_ledger
 
 ORG ?= 1
 snapshot:

@@ -190,12 +190,16 @@ def load_cells(path: str) -> dict[str, Cell]:
     }
 
 
-def load_config(manifest_path: str, fleet_path: str) -> tuple[Graph, dict[str, Cell]]:
+def load_config(manifest_path: str, fleet_path: str) -> tuple[Graph, dict[str, Cell], str]:
     """
-    Load manifest and fleet configs and cross-validate: a fleet is only fully valid relative to a manifest.
+    Load manifest and fleet configs and cross-validate: a fleet is only fully valid relative
+    to a manifest. Also returns the ledger DSN (fleet.yaml `ledger:` -- monarch's own move
+    state, outside any cell).
     """
     graph = load_graph(manifest_path)
     cells = load_cells(fleet_path)
+    with open(fleet_path) as f:
+        ledger_dsn: str = yaml.safe_load(f)["ledger"]["dsn"]
     for cell in cells.values():
         cell.validate(graph)
-    return graph, cells
+    return graph, cells, ledger_dsn

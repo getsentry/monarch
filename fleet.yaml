@@ -29,3 +29,7 @@ cells:
     blobs:
       filestore: { file_path: mock_storages/buckets/filestore/sink }
       attachment_blobs: { file_path: mock_storages/buckets/attachment_blobs/sink }
+
+# Monarch's own durable move state
+ledger:
+  dsn: host=127.0.0.1 port=5432 user=monarch password=monarch dbname=monarch_ledger

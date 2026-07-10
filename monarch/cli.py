@@ -7,7 +7,7 @@ from functools import partial
 
 import psycopg
 
-from . import slot
+from . import move, slot
 from .blobs import Bucket, copy_blob
 from .config import BlobStore, Cell, Database, Graph, load_config
 from .cell_eviction import run_evict
@@ -102,27 +102,39 @@ def cmd_create_publication(org_id: int, graph: Graph, source: Cell) -> None:
             print("\n\n".join(statements))
 
 
-def cmd_snapshot(org_id: int, graph: Graph, source: Cell, sink: Cell) -> None:
+def cmd_snapshot(org_id: int, graph: Graph, source: Cell, sink: Cell, ledger_dsn: str) -> None:
     # Slot guards span the whole snapshot: every source database's slot + pinned connection
     # must outlive the snapshot transactions, and a failure anywhere drops the slots (slot.py).
     with ExitStack() as stack:
-        sinks = {db.dsn: stack.enter_context(connect(db.dsn)) for db in sink.databases}
-        conns = {db.dsn: stack.enter_context(connect(db.dsn)) for db in source.databases}
-        sources = []
-        for db in source.databases:
-            # gate, not autocreate: the publications must predate the slot's consistent point
-            # (pgoutput resolves them through each transaction's historic catalog snapshot), so
-            # a missing one can't be fixed after the fact -- fail before the full scan
-            for name in slot.publication_names(org_id):
-                if not slot.publication_exists(conns[db.dsn], name):
-                    sys.exit(f"publication {name} missing on {db.dbname}")
-            lsn, snapshot = stack.enter_context(slot.create_slot(db.dsn, slot_name(org_id, db)))
-            print(f"slot {slot_name(org_id, db)} created at LSN {lsn} (snapshot {snapshot})")
-            sources.append(Source(db, conns[db.dsn], snapshot))
-        print()
-        membership = run_snapshot(sources, sinks, sink, graph, org_id, blob_copiers(graph, source, sink))
-        save_membership(org_id, membership)
-        print(f"\nmembership saved to {membership_path(org_id)}")
+        book = stack.enter_context(connect(ledger_dsn))
+        try:
+            m = move.create(
+                book, org_id, source.name, sink.name, [db.dbname for db in source.databases]
+            )
+        except psycopg.errors.UniqueViolation:
+            sys.exit("a live move already exists (one move at a time) -- finish or abort it first")
+        try:
+            sinks = {db.dsn: stack.enter_context(connect(db.dsn)) for db in sink.databases}
+            conns = {db.dsn: stack.enter_context(connect(db.dsn)) for db in source.databases}
+            sources = []
+            for db in source.databases:
+                # gate, not autocreate: the publications must predate the slot's consistent point
+                # (pgoutput resolves them through each transaction's historic catalog snapshot), so
+                # a missing one can't be fixed after the fact -- fail before the full scan
+                for name in slot.publication_names(org_id):
+                    if not slot.publication_exists(conns[db.dsn], name):
+                        sys.exit(f"publication {name} missing on {db.dbname}")
+                lsn, snapshot = stack.enter_context(slot.create_slot(db.dsn, slot_name(org_id, db)))
+                print(f"slot {slot_name(org_id, db)} created at LSN {lsn} (snapshot {snapshot})")
+                sources.append(Source(db, conns[db.dsn], snapshot))
+            print()
+            membership = run_snapshot(sources, sinks, sink, graph, org_id, blob_copiers(graph, source, sink))
+            save_membership(org_id, membership)
+            print(f"\nmembership saved to {membership_path(org_id)}")
+        except BaseException as e:
+            # release the claim create() took: a dead live row would block every future move
+            m.transition(move.Phase.ABORTED, note=repr(e))
+            raise
 
 
 def cmd_stream(org_id: int, graph: Graph, source: Cell, sink: Cell) -> None:
@@ -186,12 +198,12 @@ def main() -> None:
     p.add_argument("--cell", default="source", help="cell to evict the org from (fleet.yaml)")
     args = parser.parse_args()
 
-    graph, cells = load_config(CONFIG, FLEET)
+    graph, cells, ledger_dsn = load_config(CONFIG, FLEET)
     match args.cmd:
         case "create-publication":
             cmd_create_publication(args.org_id, graph, cells[args.source])
         case "snapshot":
-            cmd_snapshot(args.org_id, graph, cells[args.source], cells[args.sink])
+            cmd_snapshot(args.org_id, graph, cells[args.source], cells[args.sink], ledger_dsn)
         case "stream":
             try:
                 cmd_stream(args.org_id, graph, cells[args.source], cells[args.sink])
