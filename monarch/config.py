@@ -64,6 +64,20 @@ class Graph:
         by the snapshot's predicates and the stream's row-level admit check."""
         return next((e for e in self.edges.get(table, []) if not e.nullable), None)
 
+    def publication_edge(self, table: str) -> Edge | None:
+        """A non-nullable edge to a static parent (the root or a frozen table): usable as a
+        publisher-side row filter, since the parent's id set cannot change during the move.
+        Distinct from scope_edge, which may pick a dynamic parent (groupassignee scopes by
+        group_id but filters by project_id)."""
+        return next(
+            (
+                e
+                for e in self.edges.get(table, [])
+                if not e.nullable and (e.parent == self.root or e.parent in self.frozen)
+            ),
+            None,
+        )
+
     def validate(self) -> None:
         for table, store in self.store_of.items():
             if not isinstance(self.stores.get(store), PostgresStore):
@@ -133,6 +147,11 @@ def load_graph(path: str) -> Graph:
 class Database:
     dsn: str
     stores: list[str]
+    admin_dsn: str | None = None  # DDL endpoint (the primary) when dsn is a standby
+
+    @property
+    def ddl_dsn(self) -> str:
+        return self.admin_dsn or self.dsn
 
     @property
     def dbname(self) -> str:
@@ -164,7 +183,7 @@ def load_cells(path: str) -> dict[str, Cell]:
     return {
         name: Cell(
             name,
-            [Database(d["dsn"], d["stores"]) for d in c["databases"]],
+            [Database(d["dsn"], d["stores"], d.get("admin_dsn")) for d in c["databases"]],
             c.get("blobs", {}),
         )
         for name, c in raw["cells"].items()

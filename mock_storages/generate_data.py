@@ -11,7 +11,7 @@ import yaml
 
 from dependencies import CONFIG, FLEET, load_from_config, topological_sort
 
-ORG_NAMES = ["acme", "other"]
+ORG_NAMES = ["evil-corp", "other"]
 REPO_ROOT = os.path.dirname(os.path.abspath(CONFIG))
 
 

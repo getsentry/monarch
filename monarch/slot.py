@@ -6,6 +6,7 @@ SNAPSHOT and reads exactly the pre-slot state, so snapshot and stream meet at th
 consistent point: nothing missed, nothing seen by both. Duplicates now come only from crash
 re-delivery on the stream side, still absorbed by idempotent apply."""
 
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -15,13 +16,120 @@ import psycopg2.extras
 from psycopg import Connection
 from psycopg2.extras import LogicalReplicationConnection
 
-# The publication pgoutput decodes through.
-# TODO: FOR ALL TABLES suits the demo, whose databases hold only manifest tables; production
-# should publish the manifest's table list (skips decoding tables monarch never moves, and
-# doesn't need superuser). On PG16 sources, also consider row filters - they can prune a column
-# by the org id or project id filter, though cannot walk the whole org graph, so our consumer
-# still needs to handle membership-based scoping.
-PUBLICATION = "monarch"
+from .config import Graph
+
+
+def publication_names(org_id: int) -> list[str]:
+    """The org's publication pair (per-org, like the slots: the filters embed the org's ids).
+    _ins publishes only inserts and carries every row filter: a publication that never
+    publishes update/delete may filter on any column -- no replica identity constraint, so
+    no schema cooperation is needed. _mut publishes update/delete/truncate unfiltered; WAL
+    holds a row's old image only as its replica-identity columns (id), so those operations
+    are not filterable without per-table index migrations -- TailFilter scopes them, as it
+    always has. Requires PG15+ (row filters and publish lists)."""
+    return [f"monarch_org_{org_id}_ins", f"monarch_org_{org_id}_mut"]
+
+
+def build_row_filters(
+    graph: Graph,
+    tables: list[str],
+    org_id: int,
+    frozen_ids: dict[str, list[int]],
+    conn: Connection,
+) -> tuple[dict[str, str | None], dict[str, str | None]]:
+    """(insert-side, update/delete-side) predicate per table; None where the table takes no
+    filter. Inserts take every statically expressible predicate -- publish=insert has no
+    replica identity constraint. Dynamic parents (group_id scoping) are expressible on
+    neither side. A predicate joins the update/delete side only where the table's replica
+    identity covers its column (WAL logs a row's old image as its replica identity only, so
+    anything else is unevaluable): the root always qualifies (id is the pk), other tables
+    opt in via an RI-covering index -- a schema decision monarch discovers, never demands.
+    Filters must pass a superset of the org's rows -- they prefilter for TailFilter, which
+    remains the authority on scope."""
+    ins: dict[str, str | None] = {}
+    mut: dict[str, str | None] = {}
+    for table in tables:
+        if table == graph.root:
+            column, predicate = "id", f"id = {org_id}"
+        elif (edge := graph.publication_edge(table)) is None:
+            ins[table] = mut[table] = None
+            continue
+        elif edge.parent == graph.root:
+            column, predicate = edge.column, f"{edge.column} = {org_id}"
+        else:  # frozen parent: its id set cannot change during the move
+            ids = frozen_ids[edge.parent]
+            column = edge.column
+            predicate = f"{column} IN ({', '.join(map(str, ids))})" if ids else "false"
+        ins[table] = predicate
+        covered = replica_identity_columns(conn, table)
+        mut[table] = predicate if covered is None or column in covered else None
+    return ins, mut
+
+
+def replica_identity_columns(conn: Connection, table: str) -> set[str] | None:
+    """The columns WAL logs as a row's old image -- the only ones an update/delete row
+    filter may use. None means all of them (REPLICA IDENTITY FULL)."""
+    row = conn.execute(
+        "SELECT relreplident FROM pg_class WHERE oid = %s::regclass", (table,)
+    ).fetchone()
+    assert row is not None
+    match row[0]:
+        case "f":
+            return None
+        case "n":
+            return set()
+        case kind:
+            which = "indisreplident" if kind == "i" else "indisprimary"
+            rows = conn.execute(
+                f"""SELECT a.attname FROM pg_index i
+                    JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+                    WHERE i.indrelid = %s::regclass AND i.{which}""",
+                (table,),
+            ).fetchall()
+            return {r[0] for r in rows}
+
+
+def create_publications(
+    admin: Connection,
+    standby: Connection,
+    org_id: int,
+    ins_filters: dict[str, str | None],
+    mut_filters: dict[str, str | None],
+) -> list[str]:
+    """Create the org's publication pair on the primary and wait until both replicate to
+    the standby -- catalog objects, and the slot must only be created once pgoutput there
+    can see them. Returns the executed DDL. Recreating an existing publication errors
+    (DuplicateObject; there is no IF NOT EXISTS) and that's wanted: an existing one may
+    hold stale frozen-id filters that would silently drop in-scope rows in the walsender,
+    so it must be dropped explicitly, never reused."""
+    ins, mut = publication_names(org_id)
+
+    def render(filters: dict[str, str | None]) -> str:
+        return ",\n  ".join(f'"{t}" WHERE ({p})' if p else f'"{t}"' for t, p in filters.items())
+
+    statements = [
+        f"CREATE PUBLICATION {ins} FOR TABLE\n  {render(ins_filters)}\nWITH (publish = 'insert')",
+        f"CREATE PUBLICATION {mut} FOR TABLE\n  {render(mut_filters)}\nWITH (publish = 'update, delete, truncate')",
+    ]
+    for statement in statements:
+        admin.execute(statement)
+    for _ in range(100):
+        if all(publication_exists(standby, name) for name in (ins, mut)):
+            return statements
+        time.sleep(0.1)
+    raise RuntimeError(f"publications {ins}/{mut} not visible on the standby after 10s")
+
+
+def publication_exists(conn: Connection, name: str) -> bool:
+    return (
+        conn.execute("SELECT 1 FROM pg_publication WHERE pubname = %s", (name,)).fetchone()
+        is not None
+    )
+
+
+def drop_publication(conn: Connection, name: str) -> None:
+    """Drop the org's publication alongside its slots (after cutover, or aborting a move)."""
+    conn.execute(f"DROP PUBLICATION IF EXISTS {name}")
 
 
 def connect_replication(dsn: str) -> LogicalReplicationConnection:
@@ -65,14 +173,6 @@ def _drop_best_effort(dsn: str, name: str) -> None:
         print(f"Cleaned up slot {name}")
     except Exception as e:
         print(f"WARNING: could not drop slot {name} ({e}) -- drop it manually")
-
-
-def ensure_publication(conn: Connection) -> None:
-    exists = conn.execute(
-        "SELECT 1 FROM pg_publication WHERE pubname = %s", (PUBLICATION,)
-    ).fetchone()
-    if exists is None:
-        conn.execute(f"CREATE PUBLICATION {PUBLICATION} FOR ALL TABLES")
 
 
 def drop_replication_slot(conn: Connection, name: str) -> None:

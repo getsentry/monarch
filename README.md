@@ -48,9 +48,9 @@ This repo aims to prototype two things:
 ```sh
 make up                            # start Postgres
 make schema                        # create source + sink dbs and schema
-make data                          # seed the source cell with two orgs (acme, other)
+make data                          # seed the source cell with two orgs (evil-corp, other)
 cargo run -- snapshot --org-id 1   # snapshot org id 1's data from source to sink db
-cargo run -- stream --org-id 1     # stream acme's data from source to sink
+cargo run -- stream --org-id 1     # stream org 1's data from source to sink
 ```
 
 ## Not yet handled
@@ -58,3 +58,4 @@ cargo run -- stream --org-id 1     # stream acme's data from source to sink
 - **Control silo sync** — org-global data lives in the control silo and never moves, so a move
   has to reconcile those cross-silo references rather than copy them.
 
+- **Schema migrations** - schema migrations while org is being migrated

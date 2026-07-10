@@ -5,8 +5,9 @@ COMPOSE := docker compose
 PSQL := $(COMPOSE) exec -T postgres psql -U monarch -v ON_ERROR_STOP=1 -q
 SOURCE_PSQL := $(COMPOSE) exec -T primary psql -U monarch -v ON_ERROR_STOP=1 -q
 
-.PHONY: up down install databases schema data reset demo snapshot evict-source evict-sink \
-	psql-source psql-standby psql-files psql-sink rust-schema rust-data demo-rs
+.PHONY: up down install databases schema data reset demo verify snapshot opt-in-group \
+	evict-source evict-sink psql-source psql-standby psql-files psql-sink \
+	rust-schema rust-data demo-rs
 
 up:
 	$(COMPOSE) up -d
@@ -24,14 +25,12 @@ databases:
 	@$(PSQL) -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='sink'"   | grep -q 1 || $(PSQL) -d postgres -c "CREATE DATABASE sink"
 
 # Each source database gets only its stores' tables, mirroring fleet.yaml; the sink colocates
-# every store so it gets them all. Publications are catalog objects: created on the primary,
-# they replicate physically to the standby where pgoutput reads them.
-# FOR ALL TABLES is just for demo - we should filter tables and ideally rows too in the publication
+# every store so it gets them all. Publications are per-org and created by `monarch snapshot`
+# on the primary (admin_dsn in fleet.yaml); as catalog objects they replicate physically to
+# the standby where pgoutput reads them.
 schema: databases
 	-uv run python mock_storages/generate_schema.py default attachments | $(SOURCE_PSQL) -d source
-	-$(SOURCE_PSQL) -d source -c "CREATE PUBLICATION monarch FOR ALL TABLES"
 	-uv run python mock_storages/generate_schema.py files | $(SOURCE_PSQL) -d source_files
-	-$(SOURCE_PSQL) -d source_files -c "CREATE PUBLICATION monarch FOR ALL TABLES"
 	-uv run python mock_storages/generate_schema.py | $(PSQL) -d sink
 
 # Seed the source cell's databases (and the mock filestore) with example data
@@ -60,26 +59,35 @@ psql-sink:
 
 ORG ?= 1
 snapshot:
+	uv run monarch create-publication --org-id $(ORG)
 	uv run monarch snapshot --org-id $(ORG)
+
+# Opt one update-heavy table into update/delete filtering for demo
+opt-in-group:
+	$(SOURCE_PSQL) -d source -c 'ALTER TABLE "group" ALTER COLUMN project_id SET NOT NULL'
+	$(SOURCE_PSQL) -d source -c 'CREATE UNIQUE INDEX IF NOT EXISTS group_ri ON "group" (id, project_id)'
+	$(SOURCE_PSQL) -d source -c 'ALTER TABLE "group" REPLICA IDENTITY USING INDEX group_ri'
 
 # Full move demo: snapshot, poke changes, stream them, clean up. Snapshot reads + slots live on
 # the standby; pg_log_standby_snapshot() nudges a running-xacts record so slot creation succeeds
 # (not an issue on a busy prod primary).
-demo:
+# Includes a TOAST field: ship a big out-of-line value, then an update that doesn't touch it -- pgoutput
+# omits the unchanged column from the second change and the sink's copy must survive.
+demo: opt-in-group
 	@( for i in $$(seq 1 15); do sleep 1; $(SOURCE_PSQL) -d postgres -c "SELECT pg_log_standby_snapshot()" >/dev/null 2>&1; done ) &
+	uv run monarch create-publication --org-id $(ORG)
 	uv run monarch snapshot --org-id $(ORG)
 	$(SOURCE_PSQL) -d source -c 'INSERT INTO "group" (project_id) VALUES (1)'
 	@key=$$(uv run python mock_storages/write_blob.py 'streamed demo blob'); \
 		$(SOURCE_PSQL) -d source_files -c "INSERT INTO file (project_id, path) VALUES (1, '$$key')"
-	@# TOAST: ship a big out-of-line value, then an update that doesn't touch it -- pgoutput
-	@# omits the unchanged column from the second change and the sink's copy must survive.
-	@echo "== TOAST test: write a 160KB commit.message on the source, then update another column"
-	@echo "== (the second change omits the unchanged big value; the sink's copy must survive)"
 	$(SOURCE_PSQL) -d source -c "UPDATE commit SET message = 'BIG-TOASTED-MESSAGE:' || (SELECT string_agg(md5(random()::text), '') FROM generate_series(1, 5000)) WHERE id = 1"
 	$(SOURCE_PSQL) -d source -c "UPDATE commit SET organization_id = 1 WHERE id = 1"
 	PYTHONUNBUFFERED=1 uv run monarch stream --org-id $(ORG) & PID=$$!; sleep 5; kill $$PID
 	uv run monarch drop-slot --org-id $(ORG)
-	@echo "== commit.message, source vs sink -- the two rows must match:"
+	uv run monarch drop-publication --org-id $(ORG)
+
+# Check the toast value is still in the sink (assumes `demo` was run)
+verify:
 	@$(SOURCE_PSQL) -d source -c "SELECT 'source' AS side, left(message, 20) AS message_head, length(message) FROM commit WHERE id = 1"
 	@$(PSQL) -d sink -c "SELECT 'sink' AS side, left(message, 20) AS message_head, length(message) FROM commit WHERE id = 1"
 

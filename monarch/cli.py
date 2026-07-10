@@ -59,18 +59,66 @@ def blob_copiers(graph: Graph, source: Cell, sink: Cell) -> dict[str, Callable[[
     }
 
 
+def read_frozen_ids(
+    graph: Graph, source: Cell, conns: dict[str, psycopg.Connection], org_id: int
+) -> dict[str, list[int]]:
+    """Each frozen table's ids for the org, read before slot creation: the freeze makes a
+    pre-slot read equal the snapshot's view, which is what makes IN-list row filters sound."""
+    out: dict[str, list[int]] = {}
+    for table in graph.frozen:
+        edge = graph.publication_edge(table)
+        if edge is None or edge.parent != graph.root:
+            continue
+        conn = conns[source.dsn_for(graph.store_of[table])]
+        rows = conn.execute(
+            f'SELECT id FROM "{table}" WHERE {edge.column} = %s', (org_id,)
+        ).fetchall()
+        out[table] = [r[0] for r in rows]
+    return out
+
+
+def cmd_create_publication(org_id: int, graph: Graph, source: Cell) -> None:
+    # DDL runs on each database's primary (ddl_dsn); create_publications then waits for the
+    # catalog rows to replicate to the standby, where pgoutput reads them
+    with ExitStack() as stack:
+        conns = {db.dsn: stack.enter_context(connect(db.dsn)) for db in source.databases}
+        frozen_ids = read_frozen_ids(graph, source, conns, org_id)
+        for i, db in enumerate(source.databases):
+            ins_filters, mut_filters = slot.build_row_filters(
+                graph, db.tables(graph), org_id, frozen_ids, conns[db.dsn]
+            )
+            with closing(connect(db.ddl_dsn)) as admin:
+                try:
+                    statements = slot.create_publications(
+                        admin, conns[db.dsn], org_id, ins_filters, mut_filters
+                    )
+                except psycopg.errors.DuplicateObject as e:
+                    # don't reuse in case the publication is stale
+                    print(e)
+                    return
+            if i:
+                print()
+            print(f"-- {db.dbname}")
+            print("\n\n".join(statements))
+
+
 def cmd_snapshot(org_id: int, graph: Graph, source: Cell, sink: Cell) -> None:
     # Slot guards span the whole snapshot: every source database's slot + pinned connection
     # must outlive the snapshot transactions, and a failure anywhere drops the slots (slot.py).
     with ExitStack() as stack:
         sinks = {db.dsn: stack.enter_context(connect(db.dsn)) for db in sink.databases}
+        conns = {db.dsn: stack.enter_context(connect(db.dsn)) for db in source.databases}
         sources = []
         for db in source.databases:
-            conn = stack.enter_context(connect(db.dsn))
-            slot.ensure_publication(conn)
+            # gate, not autocreate: the publications must predate the slot's consistent point
+            # (pgoutput resolves them through each transaction's historic catalog snapshot), so
+            # a missing one can't be fixed after the fact -- fail before the full scan
+            for name in slot.publication_names(org_id):
+                if not slot.publication_exists(conns[db.dsn], name):
+                    sys.exit(f"publication {name} missing on {db.dbname}")
             lsn, snapshot = stack.enter_context(slot.create_slot(db.dsn, slot_name(org_id, db)))
             print(f"slot {slot_name(org_id, db)} created at LSN {lsn} (snapshot {snapshot})")
-            sources.append(Source(db, conn, snapshot))
+            sources.append(Source(db, conns[db.dsn], snapshot))
         print()
         membership = run_snapshot(sources, sinks, sink, graph, org_id, blob_copiers(graph, source, sink))
         save_membership(org_id, membership)
@@ -88,7 +136,10 @@ def cmd_stream(org_id: int, graph: Graph, source: Cell, sink: Cell) -> None:
             conn = stack.enter_context(connect(db.dsn))
             repl = stack.enter_context(closing(slot.connect_replication(db.dsn)))
             sources.append(StreamSource(db, conn, repl, slot_name(org_id, db)))
-        run_streams(sources, sinks, sink, graph, membership, blob_copiers(graph, source, sink))
+        run_streams(
+            sources, sinks, sink, graph, membership,
+            blob_copiers(graph, source, sink), ",".join(slot.publication_names(org_id)),
+        )
 
 
 def cmd_evict(org_id: int, graph: Graph, cell: Cell) -> None:
@@ -113,6 +164,13 @@ def main() -> None:
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
     for cmd, doc in [
+        ("create-publication", "Create the org's row-filtered publications on the source primaries (before snapshot)"),
+        ("drop-publication", "Drop the org's publications (after drop-slot)"),
+    ]:
+        p = sub.add_parser(cmd, help=doc)
+        p.add_argument("--org-id", type=int, required=True)
+        p.add_argument("--from", dest="source", default="source", help="source cell in fleet.yaml")
+    for cmd, doc in [
         ("snapshot", "Snapshot the org's data from source to sink; creates the slots"),
         ("stream", "Stream the org's changes from its slots to the sink until cutover"),
         ("drop-slot", "Drop the org's replication slots (after cutover, or to abort a move)"),
@@ -130,6 +188,8 @@ def main() -> None:
 
     graph, cells = load_config(CONFIG, FLEET)
     match args.cmd:
+        case "create-publication":
+            cmd_create_publication(args.org_id, graph, cells[args.source])
         case "snapshot":
             cmd_snapshot(args.org_id, graph, cells[args.source], cells[args.sink])
         case "stream":
@@ -142,6 +202,12 @@ def main() -> None:
                 with connect(db.dsn) as conn:
                     slot.drop_replication_slot(conn, slot_name(args.org_id, db))
                     print(f"slot {slot_name(args.org_id, db)} dropped")
+        case "drop-publication":
+            for db in cells[args.source].databases:
+                with connect(db.ddl_dsn) as admin:
+                    for name in slot.publication_names(args.org_id):
+                        slot.drop_publication(admin, name)
+                        print(f"publication {name} dropped on {db.dbname}")
         case "evict":
             cmd_evict(args.org_id, graph, cells[args.cell])
 

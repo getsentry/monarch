@@ -28,8 +28,6 @@ from .config import Cell, Database, Graph
 from .decode import Change, Commit, Decoder
 from psycopg2.extras import LogicalReplicationConnection, ReplicationCursor
 
-from .slot import PUBLICATION
-
 Membership = dict[str, set[int]]
 
 
@@ -70,6 +68,7 @@ def run_streams(
     graph: Graph,
     membership: Membership,
     copiers: dict[str, Callable[[str], bool]],
+    publications: str,  # comma-separated, as pgoutput's publication_names option expects
 ) -> None:
     """Consume every source database's slot until interrupted -- the streams have no natural end
     before cutover. Apply, then ack, per stream: feedback flushes a commit's LSN only after its
@@ -87,7 +86,7 @@ def run_streams(
         cur.start_replication(
             slot_name=s.slot,
             decode=False,
-            options={"proto_version": "1", "publication_names": PUBLICATION},
+            options={"proto_version": "1", "publication_names": publications},
         )
         streams.append(_Stream(s.db, cur, TailFilter(Decoder(s.conn), graph, scope)))
     names = ", ".join(st.db.dbname for st in streams)

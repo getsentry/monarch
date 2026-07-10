@@ -10,9 +10,13 @@
 cells:
   source:
     databases:
+      # dsn = decode endpoint (the standby); admin_dsn = DDL endpoint (the primary), where
+      # per-org publications are created and replicate physically to the standby
       - dsn: host=127.0.0.1 port=5434 user=monarch password=monarch dbname=source
+        admin_dsn: host=127.0.0.1 port=5433 user=monarch password=monarch dbname=source
         stores: [default, attachments]
       - dsn: host=127.0.0.1 port=5434 user=monarch password=monarch dbname=source_files
+        admin_dsn: host=127.0.0.1 port=5433 user=monarch password=monarch dbname=source_files
         stores: [files]
     # blob stores have no slot/stream; the cell just names its bucket (a directory in the demo)
     blobs:
