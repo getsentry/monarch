@@ -17,6 +17,49 @@ class Source:
     snapshot: str  # the slot's exported snapshot name
 
 
+def estimate_predicate(
+    graph: Graph, table: str, org_id: int, frozen_ids: dict[str, list[int]]
+) -> str | None:
+    """For ESTIMATION only (EXPLAIN, never executed): exact anchors at root/frozen ids,
+    nested semi-joins for dynamic chains so the planner estimates the fanout upfront --
+    estimating needs no parent ids, only statistics. Dynamic chains never cross databases
+    (config.validate forbids cross-store dynamic scope edges), so the subquery always runs.
+    None = not org-scoped; the walk doesn't copy it either."""
+    if table == graph.root:
+        return f"id = {org_id}"
+    if (edge := graph.scope_edge(table)) is None:
+        return None
+    if edge.parent == graph.root:
+        return f"{edge.column} = {org_id}"
+    if edge.parent in graph.frozen:
+        ids = frozen_ids[edge.parent]
+        return f"{edge.column} IN ({', '.join(map(str, ids))})" if ids else "false"
+    inner = estimate_predicate(graph, edge.parent, org_id, frozen_ids)
+    return f'{edge.column} IN (SELECT id FROM "{edge.parent}" WHERE {inner})'
+
+
+def estimate_rows(
+    conn: Connection,
+    graph: Graph,
+    tables: list[str],
+    org_id: int,
+    frozen_ids: dict[str, list[int]],
+) -> int:
+    """Planner-estimated org rows across `tables`: milliseconds regardless of data size --
+    never count(*), which would re-pay the copy's own scan. Complete but inexact; written
+    once as copy_rows_estimate (display only, nothing gates on it)."""
+    total = 0
+    for table in tables:
+        if (predicate := estimate_predicate(graph, table, org_id, frozen_ids)) is None:
+            continue
+        row = conn.execute(
+            f'EXPLAIN (FORMAT JSON) SELECT 1 FROM "{table}" WHERE {predicate}'
+        ).fetchone()
+        assert row is not None
+        total += int(row[0][0]["Plan"]["Plan Rows"])
+    return total
+
+
 def scope_predicate(
     graph: Graph, table: str, keys: dict[str, list[int]], root_id: int
 ) -> tuple[str, sql.Composable] | None:

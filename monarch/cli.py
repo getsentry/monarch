@@ -11,7 +11,7 @@ from . import move, slot
 from .blobs import Bucket, copy_blob
 from .config import BlobStore, Cell, Database, Graph, load_config
 from .cell_eviction import run_evict
-from .snapshot import Source, run_snapshot
+from .snapshot import Source, estimate_rows, run_snapshot
 from .stream import Membership, StreamSource, run_streams
 
 CONFIG = "postgres_config.yaml"
@@ -116,6 +116,7 @@ def cmd_snapshot(org_id: int, graph: Graph, source: Cell, sink: Cell, ledger_dsn
         try:
             sinks = {db.dsn: stack.enter_context(connect(db.dsn)) for db in sink.databases}
             conns = {db.dsn: stack.enter_context(connect(db.dsn)) for db in source.databases}
+            frozen_ids = read_frozen_ids(graph, source, conns, org_id)
             sources = []
             for db in source.databases:
                 # gate, not autocreate: the publications must predate the slot's consistent point
@@ -126,10 +127,20 @@ def cmd_snapshot(org_id: int, graph: Graph, source: Cell, sink: Cell, ledger_dsn
                         sys.exit(f"publication {name} missing on {db.dbname}")
                 lsn, snapshot = stack.enter_context(slot.create_slot(db.dsn, slot_name(org_id, db)))
                 print(f"slot {slot_name(org_id, db)} created at LSN {lsn} (snapshot {snapshot})")
+                unit = move.MoveUnit(m, db.dbname)
+                unit.transition(move.UnitStatus.COPYING, note=f"slot {slot_name(org_id, db)} at {lsn}")
+                unit.record_copy_estimate(
+                    estimate_rows(conns[db.dsn], graph, db.tables(graph), org_id, frozen_ids)
+                )
                 sources.append(Source(db, conns[db.dsn], snapshot))
             print()
             membership = run_snapshot(sources, sinks, sink, graph, org_id, blob_copiers(graph, source, sink))
             save_membership(org_id, membership)
+            for db in source.databases:
+                rows = sum(len(membership.get(t, ())) for t in db.tables(graph))
+                unit = move.MoveUnit(m, db.dbname)
+                unit.record_copy_total(rows)
+                unit.transition(move.UnitStatus.STREAMING, note=f"{rows} rows copied")
             print(f"\nmembership saved to {membership_path(org_id)}")
         except BaseException as e:
             # release the claim create() took: a dead live row would block every future move

@@ -37,10 +37,16 @@ schema: databases
 	-uv run python mock_storages/generate_schema.py | $(PSQL) -d sink
 	$(PSQL) -d monarch_ledger < monarch/migrations/ledger.sql
 
-# Seed the source cell's databases (and the mock filestore) with example data
+# Seed the source cell's databases (and the mock filestore) with example data.
+# ANALYZE after seeding: monarch's copy_rows_estimate comes from EXPLAIN, which is only as
+# good as the tables' statistics -- freshly seeded tables have none and the planner guesses
+# wildly. Runs on the primary (a standby is read-only) and replicates to the standby, where
+# the estimates are computed. Production relies on autoanalyze for the same effect.
 data:
 	uv run python mock_storages/generate_data.py default attachments | $(SOURCE_PSQL) -d source
 	uv run python mock_storages/generate_data.py files | $(SOURCE_PSQL) -d source_files
+	$(SOURCE_PSQL) -d source -c "ANALYZE"
+	$(SOURCE_PSQL) -d source_files -c "ANALYZE"
 
 # Reset the demo to a blank slate: drop every database, both buckets, and the move's
 # membership files (rebuild with `make schema data`). Slots on the standby are dropped

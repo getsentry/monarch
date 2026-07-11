@@ -30,6 +30,11 @@ CREATE TABLE IF NOT EXISTS move_unit (
     -- when the mover's applied position crossed the fence; NULL = not yet. a latched fact,
     -- not a status: the pipe keeps streaming (stragglers) after crossing
     fence_passed_at timestamptz,
+    -- the copy denominator, as two write-once facts: the planner's prediction at copy start
+    -- (complete but inexact) and the actual at copy completion. UI divides by
+    -- COALESCE(total, estimate); display only, nothing gates on either
+    copy_rows_estimate bigint,
+    copy_rows_total    bigint,
     -- advisory gauges, overwritten each mover heartbeat; never read by transitions.
     -- stale heartbeat_at = the mover is dead or wedged
     applied        text,         -- position applied to the sink (same format as fence)

@@ -157,6 +157,25 @@ class MoveUnit:
                 self.add_event("fence passed")
         return passed
 
+    def record_copy_estimate(self, rows: int) -> None:
+        """Write-once prediction of the copy's row count -- the progress-bar denominator
+        until record_copy_total supplies the actual (UI: COALESCE(total, estimate)).
+        Display only; the bar caps at 99% until the transition to streaming says done."""
+        self.move.conn.execute(
+            "UPDATE move_unit SET copy_rows_estimate = %s"
+            " WHERE move_id = %s AND unit = %s AND copy_rows_estimate IS NULL",
+            (rows, self.move.id, self.unit),
+        )
+
+    def record_copy_total(self, rows: int) -> None:
+        """Write-once actual, at copy completion; estimate vs total is the planner-quality
+        delta. Display only, like the estimate."""
+        self.move.conn.execute(
+            "UPDATE move_unit SET copy_rows_total = %s"
+            " WHERE move_id = %s AND unit = %s AND copy_rows_total IS NULL",
+            (rows, self.move.id, self.unit),
+        )
+
     def add_event(self, message: str) -> None:
         self.move.conn.execute(
             "INSERT INTO move_event (move_id, unit, message) VALUES (%s, %s, %s)",
