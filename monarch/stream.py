@@ -96,8 +96,10 @@ def run_streams(
         )
         streams.append(_Stream(s.store, cur, TailFilter(Decoder(s.conn), graph, scope)))
         # do-then-record: streaming only once this slot really has a consumer. False on a
-        # restart (already streaming) -- carry on, no duplicate journal line
-        units[s.store].transition(UnitStatus.STREAMING, note=f"consuming {s.slot}")
+        # restart (already streaming) -- journal the resume as its own fact, not a fake
+        # duplicate transition
+        if not units[s.store].transition(UnitStatus.STREAMING, note=f"consuming {s.slot}"):
+            units[s.store].add_event(f"mover resumed: consuming {s.slot}")
     names = ", ".join(st.store for st in streams)
     print(f"\nstream: consuming slots on [{names}] for org changes (Ctrl-C to stop)\n")
     # read_message + select instead of consume_stream: consume_stream is one long-running C

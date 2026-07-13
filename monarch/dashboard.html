@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Monarch — live move</title>
+<title>Monarch playground</title>
 <style>
   /* palette + component language borrowed from docs/move-lifecycle.html so the live
      dashboard and the architecture doc read as siblings */
@@ -108,9 +108,9 @@
                  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .snode .bind { font-size: 11px; color: var(--ink-2); margin-top: 2px; }
   .snode, .mini { cursor: default; }
-  /* conductor (mock): outline while waiting -- unmet gates in the tooltip, never the
+  /* actions (mock): outline while waiting -- unmet gates in the tooltip, never the
      label -- filled solid when armed; danger actions stay red */
-  #conductor-toggle { position: fixed; left: 18px; top: 18px; z-index: 20;
+  #actions-toggle { position: fixed; left: 18px; top: 18px; z-index: 20;
                       border: 1px solid var(--border); border-radius: 999px; padding: 7px 14px;
                       font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
                       background: var(--surface); color: var(--ink-2);
@@ -198,12 +198,12 @@
     </aside>
   </div>
 </div>
-<!-- conductor: demo tooling behind a toggle, fixed-position so it hovers over the
+<!-- actions: demo tooling behind a toggle, fixed-position so it hovers over the
      dashboard without disturbing the page layout. always available (no URL param) -->
-<button id="conductor-toggle">conductor</button>
+<button id="actions-toggle">actions</button>
 <div id="drawer">
   <article class="card" id="actions">
-    <h2>conductor <span>· part mock</span></h2>
+    <h2>actions <span>· part mock</span></h2>
     <!-- options load from GET /orgs, each cell's root table read live -->
     <select id="orgpick">
       <option value="">org to move…</option>
@@ -407,9 +407,9 @@ function drawEdges() {
 }
 window.addEventListener("resize", drawEdges);
 
-// ---- conductor (UI MOCK): availability is computed for real from live state -- these are
+// ---- actions (UI MOCK): availability is computed for real from live state -- these are
 // the future coordinator's gates, dry-run -- but clicks only narrate.
-$("conductor-toggle").addEventListener("click", () => $("drawer").classList.toggle("open"));
+$("actions-toggle").addEventListener("click", () => $("drawer").classList.toggle("open"));
 if (pinned) $("orgpick").style.display = "none";  // pre-move: picking happens on the index
 $("orgpick").addEventListener("change", renderActions);
 
@@ -461,7 +461,13 @@ const ACTIONS = [
       if (lastUnits.some(u => u.status !== "pending")) return "snapshot already ran";
       return lastUnits.every(u => pubsCreated.has(u.unit)) ? null : "create the publications first";
     } },
-  { label: "start stream", would: "spawn `monarch stream` as a managed child process",
+  { label: "start stream",
+    run: async note => {
+      const { ok, status, body } = await post("/stream", { move: +pinned });
+      if (!ok) { note(body.error ?? `failed (${status}) — restart \`monarch dashboard\`?`); return false; }
+      note("stream spawned — heartbeats confirm each store's mover");
+      return true;
+    },
     // copied = fresh start; streaming with no live movers = restart after a stop/crash
     arm: m => !m || m.phase !== "active" ? "needs an active move"
       : !lastUnits.every(u => ["copied", "streaming"].includes(u.status)) ? "run snapshot first"

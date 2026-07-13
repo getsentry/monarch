@@ -159,6 +159,8 @@ class Handler(BaseHTTPRequestHandler):
             self._spawn_step(body, "create-publication")
         elif path == "/snapshot":
             self._spawn_step(body, "snapshot")
+        elif path == "/stream":
+            self._spawn_step(body, "stream")
         else:
             self._respond(404, "text/plain", b"not found")
 
@@ -202,7 +204,8 @@ class Handler(BaseHTTPRequestHandler):
         args = [sys.executable, "-m", "monarch.cli", command, "--org-id", str(row[0])]
         if command == "create-publication":  # snapshot's route comes from the move row
             args += ["--from", row[1]]
-        subprocess.Popen(args)
+        proc = subprocess.Popen(args)
+        print(f"{datetime.now():%H:%M:%S} spawned `monarch {' '.join(args[3:])}` (pid {proc.pid})")
         self._respond(202, "application/json", _to_json({"spawned": command}))
 
     def do_GET(self) -> None:
@@ -235,7 +238,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def log_message(self, fmt: str, *args) -> None:
-        pass  # one line per poll drowns the terminal; errors still raise normally
+        # polls are GETs and drown the terminal; POSTs are rare -- one line per click
+        if args and str(args[0]).startswith("POST"):
+            print(f"{datetime.now():%H:%M:%S} {str(args[0]).removesuffix(' HTTP/1.1')} -> {args[1]}")
 
 
 def run_dashboard(conn: Connection, port: int, graph: Graph, cells: dict[str, Cell]) -> None:
