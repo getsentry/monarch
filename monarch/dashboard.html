@@ -1,0 +1,638 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Monarch — live move</title>
+<style>
+  /* palette + component language borrowed from docs/move-lifecycle.html so the live
+     dashboard and the architecture doc read as siblings */
+  :root {
+    --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e;
+    --muted: #898781; --grid: #e1e0d9; --border: rgba(11, 11, 11, 0.10);
+    --blue: #2a78d6; --yellow: #eda100; --orange: #eb6834;
+    --good: #006300; --bad: #d03b3b; --edge: #b6b4ac; --aqua: #1baf7a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7;
+      --muted: #898781; --grid: #2c2c2a; --border: rgba(255, 255, 255, 0.10);
+      --blue: #3987e5; --yellow: #c98500; --orange: #d95926;
+      --good: #0ca30c; --bad: #d03b3b; --edge: #55534d; --aqua: #199e70;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--ink);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .wrap { max-width: 1140px; margin: 0 auto; padding: 18px 24px 40px; }
+  .layout { display: grid; grid-template-columns: 1fr 260px; gap: 16px; align-items: start; }
+  .main { min-width: 0; }
+  .side { display: grid; gap: 16px; }
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+
+  header { display: flex; justify-content: space-between; align-items: baseline;
+           gap: 16px; flex-wrap: wrap; }
+  h1 { font-size: 20px; margin: 0; }
+  h1 small { color: var(--ink-2); font-weight: 400; font-size: 14px; margin-left: 8px; }
+  .pill { border: 1px solid var(--border); border-radius: 999px; padding: 3px 12px;
+          font-size: 13px; font-weight: 600; background: var(--surface); }
+  .pill.run { color: var(--blue); }
+  .pill.warn { color: var(--yellow); }
+  .pill.ok { color: var(--good); }
+  .pill.bad { color: var(--bad); }
+  .status { display: flex; gap: 12px; align-items: center; }
+  #back { color: var(--ink-2); text-decoration: none; font-size: 13px; }
+  #back:hover { color: var(--ink); }
+  #banner { color: var(--ink-2); margin: 6px 0 14px; min-height: 1.4em; }
+
+  /* ---- the moves list (sidebar): ledger facts only, no topology claims per row ---- */
+  .mvrow { padding: 7px 2px; border-bottom: 1px solid var(--grid); cursor: pointer; }
+  .mvrow:last-child { border-bottom: 0; }
+  .mvrow:hover { background: color-mix(in srgb, var(--grid) 35%, transparent); }
+  .mvrow .l1 { display: flex; gap: 10px; align-items: baseline; font-size: 13px; }
+  .mvrow .mid { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .mvrow .ph { font-size: 10.5px; font-weight: 700; letter-spacing: 0.05em;
+               text-transform: uppercase; color: var(--muted); }
+  .mvrow .ph.run { color: var(--blue); } .mvrow .ph.warn { color: var(--yellow); }
+  .mvrow .ph.ok { color: var(--good); } .mvrow .ph.bad { color: var(--bad); }
+  .mvrow .ph.run::before { content: "● "; font-size: 8px; vertical-align: 1px;
+                           animation: blink 2.8s ease-in-out infinite; }
+  @keyframes blink { 50% { opacity: 0.5; } }
+  .mvrow .dur { margin-left: auto; color: var(--ink-2); font-size: 12px;
+                font-variant-numeric: tabular-nums; }
+  .mvrow .l2 { color: var(--muted); font-size: 11.5px; margin-top: 1px; }
+
+  .card { background: var(--surface); border: 1px solid var(--border);
+          border-radius: 10px; padding: 14px 16px; }
+  .card h2 { font-size: 12px; font-weight: 600; letter-spacing: 0.06em;
+             text-transform: uppercase; color: var(--muted); margin: 0 0 10px; }
+
+  /* ---- topology (structure from config, status tint from the ledger) ---- */
+  #topo { margin-bottom: 16px; }
+  .graph { position: relative; }
+  .graph svg { position: absolute; inset: 0; width: 100%; height: 100%;
+               pointer-events: none; }
+  /* direction is static lineage (no arrowheads, matching the doc); motion = data flowing */
+  #edges path.live { stroke-dasharray: 6 5; animation: flow 1.1s linear infinite; }
+  @keyframes flow { to { stroke-dashoffset: -11; } }
+  /* edge labels hide until a hover singles their edge out -- they pile up otherwise */
+  #edges path { transition: opacity 0.15s; }
+  #edges path.hi { opacity: 1; stroke-width: 2.2; }
+  #edges path.dim { opacity: 0.12; }
+  #edges text.elabel { font-size: 10.5px; fill: var(--muted); opacity: 0;
+                       transition: opacity 0.15s; }
+  #edges text.elabel.hi { opacity: 1; }
+  .spine { position: relative; display: flex; justify-content: center; margin-bottom: 44px; }
+  .spinecard { background: var(--surface); border: 1.5px solid var(--grid);
+               border-radius: 10px; padding: 8px 16px 10px; }
+  .spinelab { font-size: 10px; font-weight: 700; letter-spacing: 0.07em;
+              text-transform: uppercase; color: var(--muted); text-align: center;
+              margin-bottom: 7px; }
+  .minis { display: flex; gap: 12px; justify-content: center; }
+  .mini { border: 1px solid var(--grid); border-radius: 6px; padding: 4px 11px;
+          font-size: 12.5px; font-weight: 600; }
+  .storegrid { position: relative; display: grid;
+               grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+  .storegrid.buckets { margin-top: 44px; }
+  .snode { background: var(--surface); border: 1.5px solid var(--grid);
+           border-radius: 8px; padding: 8px 11px; }
+  .snode.bucket { border-style: dashed; }
+  .snode .nm { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
+  .snode b { font-size: 13px; }
+  .snode .st { font-size: 9.5px; font-weight: 700; letter-spacing: 0.05em;
+               text-transform: uppercase; color: var(--muted); }
+  .snode .st.run { color: var(--blue); }
+  .snode .kind { font-size: 9.5px; font-weight: 600; letter-spacing: 0.06em;
+                 text-transform: uppercase; color: var(--muted); margin-top: 1px; }
+  .snode .tbls { font-size: 11.5px; color: var(--muted); margin-top: 4px;
+                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .snode .bind { font-size: 11px; color: var(--ink-2); margin-top: 2px; }
+  .snode, .mini { cursor: default; }
+  /* conductor (mock): outline while waiting -- unmet gates in the tooltip, never the
+     label -- filled solid when armed; danger actions stay red */
+  #conductor-toggle { position: fixed; left: 18px; top: 18px; z-index: 20;
+                      border: 1px solid var(--border); border-radius: 999px; padding: 7px 14px;
+                      font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+                      background: var(--surface); color: var(--ink-2);
+                      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.14); }
+  #drawer { position: fixed; left: 18px; top: 64px; width: 280px; z-index: 20;
+            display: none; }
+  #drawer .card { box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18); }
+  #drawer.open { display: block; }
+  #actions .btn { display: block; width: 100%; margin-top: 8px; padding: 6px 12px;
+                  border-radius: 8px; font: inherit; font-size: 13px; font-weight: 600;
+                  cursor: pointer; background: var(--surface); color: var(--muted);
+                  border: 1px solid var(--border); }
+  #actions .btn.armed { color: var(--page); background: var(--blue); border-color: var(--blue); }
+  #actions .btn.armed.danger { background: var(--bad); border-color: var(--bad); }
+  #actions .btn:disabled { cursor: not-allowed; opacity: 0.55; }
+  #actions .btn.fired { color: var(--ink-2); animation: blink 1.4s ease-in-out infinite; }
+  #orgpick { display: block; width: 100%; margin-top: 2px; padding: 6px 8px;
+             border-radius: 8px; font: inherit; font-size: 13px;
+             background: var(--surface); color: var(--ink);
+             border: 1px solid var(--border); }
+  #orgpick:disabled { cursor: not-allowed; opacity: 0.55; }
+  #actions .mocknote { font-size: 11.5px; color: var(--ink-2); margin-top: 10px;
+                       min-height: 2.6em; font-style: italic; }
+  #actions h2 span { color: var(--muted); font-weight: 400; text-transform: none;
+                     letter-spacing: 0; }
+  #tip { position: fixed; z-index: 10; display: none; max-width: 300px;
+         background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+         padding: 8px 12px; font-size: 12px; line-height: 1.5; color: var(--ink-2);
+         box-shadow: 0 4px 14px rgba(0, 0, 0, 0.14); pointer-events: none; }
+  #tip b { color: var(--ink); }
+
+  #units { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+           gap: 12px; margin-bottom: 16px; }
+  .unit .nm { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .unit .nm b { font-size: 14px; }
+  .unit .st { font-size: 10px; font-weight: 700; letter-spacing: 0.05em;
+              text-transform: uppercase; }
+  .unit .st::before { content: "●"; margin-right: 5px; font-size: 8px; vertical-align: 1px; }
+  .kv { display: flex; justify-content: space-between; font-size: 13px;
+        color: var(--ink-2); margin-top: 6px; }
+  .kv span:last-child { color: var(--ink); font-variant-numeric: tabular-nums; }
+
+  .feed ol { list-style: none; margin: 0; padding: 0; max-height: 340px;
+             overflow-y: auto; font-size: 13px; }
+  .feed li { display: flex; gap: 10px; padding: 3px 0; border-bottom: 1px solid var(--grid); }
+  .feed li:last-child { border-bottom: 0; }
+  .feed .t { color: var(--muted); font-variant-numeric: tabular-nums; flex: none; }
+  .feed .chip { flex: none; width: 90px; font-size: 10.5px; font-weight: 600;
+                color: var(--ink-2); text-transform: uppercase; letter-spacing: 0.04em;
+                padding-top: 2px; }
+  .feed .x { min-width: 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Monarch <small id="sub">…</small></h1>
+    <div class="status">
+      <a id="back" href="./">‹ all moves</a>
+      <span id="pill" class="pill">–</span>
+    </div>
+  </header>
+  <p id="banner"></p>
+  <div class="layout">
+    <div class="main">
+      <article class="card" id="topo">
+        <div class="graph" id="graphwrap">
+          <svg id="edges"></svg>
+          <div class="spine" id="spine"></div>
+          <div class="storegrid" id="stores"></div>
+          <div class="storegrid buckets" id="buckets"></div>
+        </div>
+      </article>
+      <article class="card feed"><h2>feed</h2><ol id="feed"></ol></article>
+    </div>
+    <aside class="side">
+      <article class="card" id="snap">
+        <h2>snapshot</h2>
+        <div id="snaprows"></div>
+      </article>
+      <article class="card" id="movescard">
+        <h2>moves</h2>
+        <div id="mvrows"></div>
+      </article>
+    </aside>
+  </div>
+</div>
+<!-- conductor: demo tooling behind a toggle, fixed-position so it hovers over the
+     dashboard without disturbing the page layout. always available (no URL param) -->
+<button id="conductor-toggle">conductor</button>
+<div id="drawer">
+  <article class="card" id="actions">
+    <h2>conductor <span>· part mock</span></h2>
+    <!-- options load from GET /orgs, each cell's root table read live -->
+    <select id="orgpick">
+      <option value="">org to move…</option>
+    </select>
+    <div id="actionbtns"></div>
+    <div class="mocknote" id="mocknote">wired buttons run for real — the rest narrate what they would do</div>
+  </article>
+</div>
+<div id="tip"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const PILL = { active: "run", draining: "warn", cut_over: "warn",
+               finalized: "ok", reverting: "bad", aborted: "bad" };
+const fmt = n => Number(n).toLocaleString("en-US");
+const post = async (path, payload) => {
+  const res = await fetch(path, { method: "POST",
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  // non-JSON body = a server predating this endpoint
+  return { ok: res.ok, status: res.status, body: await res.json().catch(() => ({})) };
+};
+const TERMINAL = new Set(["finalized", "aborted"]);
+// two views, one page: "/" = the start page (fleet topology + move history; the default,
+// always); "?move=N" = one move's page. every move view is by id -- no follow mode
+const pinned = new URLSearchParams(location.search).get("move");
+let since = 0;
+
+if (pinned) {
+  $("movescard").style.display = "none";
+} else {
+  $("snap").style.display = "none";
+  document.querySelector(".feed").style.display = "none";
+  $("pill").style.display = "none";
+  $("back").style.display = "none";
+  $("sub").textContent = "org moves between cells";
+}
+
+async function pollMoves() {
+  let moves;
+  try {
+    ({ moves } = await (await fetch("/moves")).json());
+    $("banner").textContent = "";
+  } catch {
+    $("banner").textContent = "dashboard server unreachable — is `monarch dashboard` still running?";
+    return;
+  }
+  lastMove = moves.find(m => !TERMINAL.has(m.phase)) ?? null;  // "register move" arming
+  if (!moves.length) {
+    $("mvrows").innerHTML = `<div class="mvrow"><div class="l1">no moves yet</div>` +
+      `<div class="l2">register one to begin</div></div>`;
+  } else {
+    const clock = at => new Date(at).toLocaleString("en-GB",
+      { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    $("mvrows").innerHTML = moves.map(m => {
+      const dur = TERMINAL.has(m.phase)
+        ? `${Math.max(1, Math.round((new Date(m.updated_at) - new Date(m.created_at)) / 1000))}s`
+        : "";
+      return `<div class="mvrow" onclick="location.href='?move=${m.id}'">` +
+        `<div class="l1"><span class="mid">#${m.id}</span>` +
+        `<span class="ph ${PILL[m.phase] ?? ""}">${m.phase.replace("_", " ")}</span>` +
+        `<span class="dur">${dur}</span></div>` +
+        `<div class="l2">org ${m.root_id} · ${m.source_cell} → ${m.sink_cell} · ${clock(m.created_at)}</div>` +
+        `</div>`;
+    }).join("");
+  }
+  renderActions();
+}
+
+// copy timings come from the journal (transitions carry timestamps; unit rows deliberately
+// don't) -- the full feed replays on load, so these are always reconstructible
+const unitTimes = {};
+// journal facts the conductor sequences on: which units have their publications
+const pubsCreated = new Set();
+
+function snapLine(u) {
+  const t = unitTimes[u.unit] ?? {};
+  const clock = at => new Date(at).toLocaleTimeString("en-GB");
+  if (u.status === "pending") return "waiting";
+  if (u.status === "copying")
+    return "copying…"
+      + (u.copy_rows_estimate != null ? ` ~${fmt(u.copy_rows_estimate)} rows expected` : "")
+      + (t.copying ? ` · started ${clock(t.copying)}` : "");
+  let s = u.copy_rows_total != null ? `✓ ${fmt(u.copy_rows_total)} rows` : "✓ copied";
+  if (u.copy_rows_total != null && u.copy_rows_estimate != null)
+    s += ` (est ~${fmt(u.copy_rows_estimate)})`;
+  if (t.copying && t.copied) {
+    const secs = (new Date(t.copied) - new Date(t.copying)) / 1000;
+    s += ` · ${secs < 10 ? secs.toFixed(1) : Math.round(secs)}s`;
+  }
+  if (t.copied) s += ` · ${clock(t.copied)}`;
+  return s;
+}
+
+function renderSnapshot(units) {
+  $("snaprows").innerHTML = units.map(u =>
+    `<div class="kv"><span>${u.unit}</span><span>${snapLine(u)}</span></div>`).join("");
+}
+
+function appendEvents(events) {
+  const ol = $("feed");
+  for (const e of events) {
+    if (e.unit) {
+      const t = unitTimes[e.unit] ??= {};
+      if (e.message.startsWith("-> copying")) t.copying = e.at;
+      else if (e.message.startsWith("-> copied")) t.copied = e.at;
+      // old journals ended the copy on "-> streaming"; ??= keeps new moves' earlier mark
+      else if (e.message.startsWith("-> streaming")) t.copied ??= e.at;
+      else if (e.message.startsWith("publications created")) pubsCreated.add(e.unit);
+    }
+    const li = document.createElement("li");
+    const t = document.createElement("span"); t.className = "t";
+    t.textContent = new Date(e.at).toLocaleTimeString("en-GB");
+    const chip = document.createElement("span"); chip.className = "chip";
+    chip.textContent = e.unit ?? "move";
+    const x = document.createElement("span"); x.className = "x";
+    x.textContent = e.message;
+    li.append(t, chip, x);
+    ol.appendChild(li);
+    since = Math.max(since, e.id);
+  }
+  if (events.length) ol.scrollTop = ol.scrollHeight;
+}
+
+async function poll() {
+  let state;
+  try {
+    state = await (await fetch(`/state?since=${since}&move=${pinned}`)).json();
+    $("banner").textContent = "";
+  } catch {
+    $("banner").textContent = "dashboard server unreachable — is `monarch dashboard` still running?";
+    return;
+  }
+  if (!state.move) {
+    $("sub").textContent = `move #${pinned} not found`;
+    return;
+  }
+  const m = state.move;
+  $("sub").textContent = `move #${m.id} · org ${m.root_id}: ${m.source_cell} → ${m.sink_cell}`;
+  $("pill").textContent = m.phase.replace("_", " ");
+  $("pill").className = `pill ${PILL[m.phase] ?? ""}`;
+  lastMove = m;
+  lastUnits = state.units;
+  tintStores(m, state.units);
+  appendEvents(state.events);
+  renderSnapshot(state.units);
+  renderActions();
+}
+
+let topo = null;
+async function loadTopology() {
+  // structure is config, fetched once; poll() overlays each store's unit status
+  try { topo = await (await fetch("/graph")).json(); } catch { return; }
+  $("spine").innerHTML = `<div class="spinecard">` +
+    `<div class="spinelab">❄ spine · fixed for the move — every cross-store edge binds here</div>` +
+    `<div class="minis">${topo.spine.map(s =>
+      `<div class="mini" id="spine-${s.table}">${s.frozen ? "❄ " : ""}${s.table}</div>`).join("")}</div></div>`;
+  const node = s => `
+    <div class="snode ${s.kind === "blob" ? "bucket" : ""}" id="node-${s.name}">
+      <div class="nm"><b>${s.name}</b>
+        <span class="st" id="storest-${s.name}"></span></div>
+      <div class="kind">${s.kind === "blob" ? "bucket" : s.kind}</div>
+      ${s.tables ? `<div class="tbls">${s.tables.length} table${s.tables.length === 1 ? "" : "s"}</div>` : ""}
+    </div>`;
+  $("stores").innerHTML = topo.stores.filter(s => s.kind === "postgres").map(node).join("");
+  $("buckets").innerHTML = topo.stores.filter(s => s.kind === "blob").map(node).join("");
+  requestAnimationFrame(drawEdges);
+}
+
+function drawEdges() {
+  // connectors from the rendered elements' actual positions: spine -> store (solid),
+  // referencing store -> bucket (dashed). redrawn on resize
+  const svg = $("edges"), wrap = $("graphwrap");
+  if (!topo || !wrap.clientWidth) return;
+  svg.setAttribute("viewBox", `0 0 ${wrap.clientWidth} ${wrap.clientHeight}`);
+  const r = wrap.getBoundingClientRect();
+  const anchor = (el, side) => {
+    const b = el.getBoundingClientRect();
+    return { x: b.left - r.left + b.width / 2, y: (side === "top" ? b.top : b.bottom) - r.top };
+  };
+  let paths = "";
+  for (const s of topo.stores) {
+    const to = $(`node-${s.name}`);
+    for (const b of s.binds) {
+      const from = $(s.kind === "blob" ? `node-${b.to}` : `spine-${b.to}`);
+      if (!from || !to) continue;
+      const a = anchor(from, "bottom"), z = anchor(to, "top");
+      const my = (a.y + z.y) / 2;
+      // liveness key: the store whose stream moves this edge's data (buckets ride their
+      // referencing store's pipe)
+      const liveKey = s.kind === "blob" ? b.to : s.name;
+      const touch = `${from.id} ${to.id}`;
+      paths += `<path d="M ${a.x} ${a.y} C ${a.x} ${my}, ${z.x} ${my}, ${z.x} ${z.y}"
+        fill="none" stroke="var(${b.cross ? "--aqua" : "--edge"})" stroke-width="1.5"
+        data-live-key="${liveKey}" data-touch="${touch}"
+        ${s.kind === "blob" ? 'stroke-dasharray="4 3"' : ""}/>`;
+      paths += `<text class="elabel" data-touch="${touch}"
+        x="${a.x + (z.x - a.x) * 0.3 + 7}" y="${a.y + (z.y - a.y) * 0.3 + 3}">${b.label}</text>`;
+    }
+  }
+  svg.innerHTML = paths;
+}
+window.addEventListener("resize", drawEdges);
+
+// ---- conductor (UI MOCK): availability is computed for real from live state -- these are
+// the future coordinator's gates, dry-run -- but clicks only narrate.
+$("conductor-toggle").addEventListener("click", () => $("drawer").classList.toggle("open"));
+if (pinned) $("orgpick").style.display = "none";  // pre-move: picking happens on the index
+$("orgpick").addEventListener("change", renderActions);
+
+const aliveCount = () => lastUnits.filter(u =>
+  u.heartbeat_at && (Date.now() - new Date(u.heartbeat_at)) / 1000 <= 15).length;
+
+// each action: arm() returns null when armed, else the unmet gate (tooltip text).
+// pre-move actions live on the index page only -- a move id exists only after
+// registration, so a move's page can't host the actions that precede it.
+// an action with run() is wired for real; the rest narrate their `would` text
+const ACTIONS = [
+  { label: "register move", pre: true,
+    run: async note => {
+      // the picked org fixes `from` (it names its cell); destination = the other cell
+      // (first non-source in fleet.yaml order -- fine while the demo fleet has two)
+      const [from, org] = $("orgpick").value.split(":");
+      const to = Object.keys(topo?.placement ?? {}).find(c => c !== from);
+      if (!to) return note("topology not loaded yet — try again");
+      const { ok, status, body } = await post("/register", { org: +org, from, to });
+      if (!ok) { note(body.error ?? `register failed (${status}) — restart \`monarch dashboard\`?`); return false; }
+      location.href = `?move=${body.id}`;  // the story continues on the move's page
+      return true;
+    },
+    arm: m => m ? "a live move exists — one move at a time"
+      : !$("orgpick").value ? "pick an org to move" : null },
+  { label: "create publications",
+    run: async note => {
+      // fire-and-watch: the spawned CLI journals each store's pair; those events arriving
+      // in the feed are the completion signal (and what arms snapshot)
+      const { ok, status, body } = await post("/create-publications", { move: +pinned });
+      if (!ok) { note(body.error ?? `failed (${status}) — restart \`monarch dashboard\`?`); return false; }
+      note("create-publication spawned — the journal confirms each store's _ins/_mut pair");
+      return true;
+    },
+    arm: m => !m || m.phase !== "active" ? "needs an active move"
+      : lastUnits.some(u => u.status !== "pending") ? "slots already exist — too late for new publications"
+      : lastUnits.length && lastUnits.every(u => pubsCreated.has(u.unit))
+        ? "publications already created" : null },
+  { label: "run snapshot",
+    run: async note => {
+      const { ok, status, body } = await post("/snapshot", { move: +pinned });
+      if (!ok) { note(body.error ?? `failed (${status}) — restart \`monarch dashboard\`?`); return false; }
+      note("snapshot spawned — slots first (units claim → copying), then the copy; streaming when each store lands");
+      return true;
+    },
+    arm: m => {
+      if (!m) return "register a move first";
+      if (m.phase !== "active") return "needs an active move";
+      if (lastUnits.some(u => u.status !== "pending")) return "snapshot already ran";
+      return lastUnits.every(u => pubsCreated.has(u.unit)) ? null : "create the publications first";
+    } },
+  { label: "start stream", would: "spawn `monarch stream` as a managed child process",
+    // copied = fresh start; streaming with no live movers = restart after a stop/crash
+    arm: m => !m || m.phase !== "active" ? "needs an active move"
+      : !lastUnits.every(u => ["copied", "streaming"].includes(u.status)) ? "run snapshot first"
+      : aliveCount() > 0 ? "movers are already running" : null },
+  { label: "stop stream", would: "SIGINT the stream child — heartbeats go stale (the dead-mover demo)",
+    arm: m => aliveCount() > 0 ? null : "no live movers" },
+  { label: "fence → draining", would: "stop org writes*, capture per-store fence LSNs + phase CAS in one ledger txn (*mock: write-stop not built — the journal would say so)",
+    arm: m => {
+      if (!m || m.phase !== "active") return "needs an active move";
+      if (!lastUnits.every(u => u.status === "streaming")) return "every store must be streaming";
+      if (aliveCount() < lastUnits.length) return "all movers must be alive (dead reporter = meaningless lag)";
+      return null;
+    } },
+  { label: "cut over", would: "verify + flip routing, phase → cut_over (source keeps the frozen copy)",
+    arm: m => !m || m.phase !== "draining" ? "needs a draining move"
+      : lastUnits.every(u => u.fence_passed_at) ? null : "every store must be past its fence" },
+  { label: "finalize", would: "drop slots + publications, evict org from source, phase → finalized (true point of no return)",
+    arm: m => !m || m.phase !== "cut_over" ? "needs a cut-over move" : null },
+  { label: "revert — emergency", danger: true,
+    would: "flip routing back, POST-FLIP SINK WRITES LOST, phase → reverting",
+    arm: m => !m || m.phase !== "cut_over" ? "only possible from cut_over, before finalize" : null },
+  { label: "abort move", danger: true,
+    would: "phase → aborted (lossless — org never left the source); sink scrub is post-terminal cleanup",
+    arm: m => m && ["active", "draining"].includes(m.phase) ? null : "nothing abortable" },
+];
+
+// fired-but-not-yet-landed latch: a clicked run() button stays disabled until its effect
+// shows up in the ledger and flips the arm gate itself -- polls must not re-arm a button
+// whose child is still working. client state; a refresh clears it (the escape hatch if a
+// spawned child dies without leaving a ledger trace)
+const fired = new Set();
+
+function renderActions() {
+  // the lease gates the picker too: mid-flight there's nothing pickable (and the moving
+  // org would list twice -- it really is in both cells until evict)
+  const busy = !!lastMove && !TERMINAL.has(lastMove.phase);
+  $("orgpick").disabled = busy;
+  $("orgpick").title = busy ? "a live move exists — one move at a time" : "";
+  $("actionbtns").innerHTML = ACTIONS.map((a, i) => {
+    if (!!a.pre === !!pinned) return "";
+    const gate = a.arm(lastMove);
+    if (!gate && fired.has(a.label))
+      return `<button class="btn fired" data-i="${i}" disabled
+        title="running — waiting for it to land in the ledger">${a.label}…</button>`;
+    if (gate) fired.delete(a.label);  // the ledger moved on: the latch has served its purpose
+    return `<button class="btn ${gate ? "" : "armed"} ${a.danger ? "danger" : ""}"
+      data-i="${i}" ${gate ? `disabled title="${gate}"` : ""}>${a.label}</button>`;
+  }).join("");
+}
+
+$("actionbtns").addEventListener("click", async e => {
+  const b = e.target.closest("button[data-i]");
+  if (!b) return;
+  const a = ACTIONS[+b.dataset.i];
+  const note = t => { $("mocknote").textContent = t; };
+  if (!a.run) return note(`mock — would: ${a.would}`);
+  fired.add(a.label);  // latch before the round-trip; run() reports whether it took
+  renderActions();
+  let ok = false;
+  try { ok = await a.run(note); }
+  catch (err) { note(`${a.label} failed: ${err.message}`); }
+  if (!ok) { fired.delete(a.label); renderActions(); }  // rejected server-side: re-arm
+});
+
+// ---- popovers: the diagram stays sparse; context lives in hover, built at hover time
+// from config (topo) + the latest poll (lastMove/lastUnits) so it's always current
+let lastMove = null, lastUnits = [];
+
+function storeTip(s) {
+  const cell = lastMove?.source_cell ?? Object.keys(topo.placement)[0];
+  const placement = topo.placement[cell] ?? {};
+  if (s.kind === "blob") {
+    const refs = s.binds.map(b => b.to).join(", ");
+    const ev = s.eviction === "delete"
+      ? "eviction: <b>delete</b> — the org's objects are removed with their rows (no reclaimer exists)"
+      : "eviction: <b>keep</b> — rows go first, the owning service's GC reclaims unreferenced bytes";
+    return `<b>${s.name}</b> · bucket<br>referenced by: <b>${refs}</b><br>${ev}<br>` +
+      `no slot or stream: objects copy alongside their referencing rows`;
+  }
+  const db = placement[s.name];
+  const mates = topo.stores.filter(o => o.kind === "postgres" && o.name !== s.name
+    && placement[o.name] === db).map(o => o.name);
+  const u = lastUnits.find(x => x.unit === s.name);
+  let lines = `<b>${s.name}</b> · postgres<br>hosted in database <b>${db ?? "?"}</b>` +
+    (mates.length
+      ? ` — shares its database with <b>${mates.join(", ")}</b> (separate slot and mover)`
+      : "");
+  if (u) {
+    lines += `<br>unit status: <b>${u.status.replace("_", " ")}</b>`;
+    if (u.copy_rows_total != null) lines += ` · ${fmt(u.copy_rows_total)} rows copied` +
+      (u.copy_rows_estimate != null ? ` (est ~${fmt(u.copy_rows_estimate)})` : "");
+    else if (u.copy_rows_estimate != null) lines += ` · ~${fmt(u.copy_rows_estimate)} rows expected`;
+    if (u.heartbeat_at) {
+      const age = Math.round((Date.now() - new Date(u.heartbeat_at)) / 1000);
+      lines += `<br>mover: ` + (age <= 15 ? `<b>alive</b> — heartbeat ${age}s ago`
+        : `<b>no heartbeat for ${age}s</b> — dead or wedged`);
+    } else if (u.status !== "pending") lines += `<br>mover: no heartbeat yet`;
+  }
+  return lines + `<br>tables: ${s.tables.join(", ")}`;
+}
+
+function spineTip(name) {
+  const s = topo.spine.find(x => x.table === name);
+  if (!s) return "";
+  return s.frozen
+    ? `<b>❄ ${name}</b> — frozen for the move: no creates or deletes, so every ` +
+      `cross-database edge resolves against a fixed id set (race-free)`
+    : `<b>${name}</b> — the root: the move is every row reachable from one ${name}`;
+}
+
+const tip = $("tip");
+
+function highlightEdges(hoveredId) {
+  for (const n of document.querySelectorAll("#edges [data-touch]")) {
+    const on = hoveredId && n.dataset.touch.split(" ").includes(hoveredId);
+    n.classList.toggle("hi", !!on);
+    if (n.tagName === "path") n.classList.toggle("dim", !!hoveredId && !on);
+  }
+}
+
+document.addEventListener("mousemove", e => {
+  const el = topo ? e.target.closest?.(".snode, .mini") : null;
+  highlightEdges(el?.id ?? null);
+  if (!el) { tip.style.display = "none"; return; }
+  const html = el.id.startsWith("spine-")
+    ? spineTip(el.id.slice(6))
+    : storeTip(topo.stores.find(s => `node-${s.name}` === el.id));
+  if (!html) { tip.style.display = "none"; return; }
+  tip.innerHTML = html;
+  tip.style.display = "block";
+  const x = Math.min(e.clientX + 14, window.innerWidth - tip.offsetWidth - 10);
+  tip.style.left = `${x}px`;
+  tip.style.top = `${e.clientY + 14}px`;
+});
+
+function tintStores(m, units) {
+  // units ARE stores now (one grain everywhere), so no placement translation
+  if (!topo) return;
+  const statusByUnit = Object.fromEntries(units.map(u => [u.unit, u.status]));
+  const flowing = new Set();
+  for (const s of topo.stores) {
+    if (s.kind === "blob") continue;
+    const status = statusByUnit[s.name];
+    if (!status) continue;
+    if (status === "copying" || status === "streaming") flowing.add(s.name);
+    const el = $(`storest-${s.name}`);
+    if (!el) continue;
+    el.textContent = status.replace("_", " ");
+    el.className = "st" + (flowing.has(s.name) ? " run" : "");
+  }
+  for (const p of document.querySelectorAll("#edges path"))
+    p.classList.toggle("live", flowing.has(p.dataset.liveKey));
+}
+
+async function loadOrgs() {
+  // fetched once at load, like the topology; refresh to re-read after seeding
+  let orgs;
+  try { ({ orgs } = await (await fetch("/orgs")).json()); } catch { return; }
+  $("orgpick").innerHTML = `<option value="">org to move…</option>` + orgs.map(o =>
+    `<option value="${o.cell}:${o.id}">${o.id} · ${o.name} — in ${o.cell}</option>`).join("");
+}
+
+loadTopology();
+if (pinned) {
+  poll();
+  setInterval(poll, 1000);
+} else {
+  loadOrgs();
+  pollMoves();
+  setInterval(pollMoves, 2000);
+}
+</script>
+</body>
+</html>

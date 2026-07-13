@@ -28,13 +28,16 @@ class Phase(StrEnum):
 
 class UnitStatus(StrEnum):
     """move_unit.status: the unit's pipe -- is data flowing between the cells and does the
-    pipe still exist. Data milestones live elsewhere: fence crossing is the fence_passed_at
+    pipe still exist. copied is the resting state between snapshot and stream: the slot
+    exists and retains WAL, but nothing is consuming -- streaming only when a stream
+    actually is. Data milestones live elsewhere: fence crossing is the fence_passed_at
     fact column (the pipe keeps streaming after it -- stragglers), liveness is heartbeat_at.
     stream_ended is recorded by teardown (finalize and abort alike) as it drops each slot,
     do-then-record; pg_replication_slots stays ground truth if they ever disagree."""
 
     PENDING = "pending"
     COPYING = "copying"
+    COPIED = "copied"
     STREAMING = "streaming"
     STREAM_ENDED = "stream_ended"
 
@@ -60,7 +63,8 @@ MOVE_TRANSITIONS: dict[Phase, set[Phase]] = {
 }
 MOVE_UNIT_TRANSITIONS: dict[UnitStatus, set[UnitStatus]] = {
     UnitStatus.PENDING: {UnitStatus.COPYING},
-    UnitStatus.COPYING: {UnitStatus.STREAMING, UnitStatus.STREAM_ENDED},  # ended = abort mid-copy
+    UnitStatus.COPYING: {UnitStatus.COPIED, UnitStatus.STREAM_ENDED},  # ended = abort mid-copy
+    UnitStatus.COPIED: {UnitStatus.STREAMING, UnitStatus.STREAM_ENDED},  # ended = abort pre-stream
     UnitStatus.STREAMING: {UnitStatus.STREAM_ENDED},
     UnitStatus.STREAM_ENDED: set(),
 }
@@ -78,6 +82,15 @@ class Move:
         row = self.conn.execute("SELECT phase FROM move WHERE id = %s", (self.id,)).fetchone()
         assert row is not None
         return Phase(row[0])
+
+    def cells(self) -> tuple[str, str]:
+        """The registered route (source, sink) -- fixed at create(); snapshot and stream
+        derive their cells from it rather than trusting flags to match."""
+        row = self.conn.execute(
+            "SELECT source_cell, sink_cell FROM move WHERE id = %s", (self.id,)
+        ).fetchone()
+        assert row is not None
+        return row[0], row[1]
 
     def transition(self, to: Phase, note: str | None = None) -> bool:
         """Guarded update of the org-level phase (coordinator only): writes only if the
@@ -116,6 +129,14 @@ class MoveUnit:
 
     move: Move
     unit: str
+
+    def status(self) -> UnitStatus:
+        row = self.move.conn.execute(
+            "SELECT status FROM move_unit WHERE move_id = %s AND unit = %s",
+            (self.move.id, self.unit),
+        ).fetchone()
+        assert row is not None
+        return UnitStatus(row[0])
 
     def transition(self, to: UnitStatus, note: str | None = None) -> bool:
         """Guarded update of this mover's status; legal sources derive from the map (its
@@ -174,6 +195,15 @@ class MoveUnit:
             "UPDATE move_unit SET copy_rows_total = %s"
             " WHERE move_id = %s AND unit = %s AND copy_rows_total IS NULL",
             (rows, self.move.id, self.unit),
+        )
+
+    def heartbeat(self) -> None:
+        """Liveness, overwritten on a clock: the mover can't announce its death, so it
+        announces being alive and staleness becomes the signal. Advisory gauge -- never
+        read by transitions."""
+        self.move.conn.execute(
+            "UPDATE move_unit SET heartbeat_at = now() WHERE move_id = %s AND unit = %s",
+            (self.move.id, self.unit),
         )
 
     def add_event(self, message: str) -> None:

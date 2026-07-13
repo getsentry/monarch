@@ -9,14 +9,14 @@ stores:
   # postgres stores mirror the fleet's clusters (default / attachments / files / ...)
   default:     { type: postgres }
   attachments: { type: postgres }
+  # no reclaimer exists in Sentry, we should delete the object when the row is removed
+  # (in objectstore's attachments in production a retention TTL also exists as a backstop)
+  attachment_blobs: { type: blob_store, eviction: delete }
   files:       { type: postgres }
   # filestore is not org/project scoped so it is not safe to delete blobs referenced by
   # a specific project. Sentry's delete_unreferenced_blobs() / cleanup_unused_files()
   # is responsible for GC on the filestore.
   filestore:   { type: blob_store, eviction: keep }
-  # no reclaimer exists in Sentry, we should delete the object when the row is removed
-  # (in objectstore's attachments in production a retention TTL also exists as a backstop)
-  attachment_blobs: { type: blob_store, eviction: delete }
 
 # `project` is marked as frozen. This means no project creation or deletion for the org
 # being moved. This is because `project` is the reference used across multiple storage systems

@@ -71,7 +71,10 @@ psql-ledger:
 	$(COMPOSE) exec postgres psql -U monarch -d monarch_ledger
 
 ORG ?= 1
+# register first: create-publication journals its per-store facts into the registered move,
+# which is what sequences the conductor's snapshot gate (publications only predate the slots)
 snapshot:
+	uv run monarch register --org-id $(ORG)
 	uv run monarch create-publication --org-id $(ORG)
 	uv run monarch snapshot --org-id $(ORG)
 
@@ -88,6 +91,7 @@ opt-in-group:
 # omits the unchanged column from the second change and the sink's copy must survive.
 demo: opt-in-group
 	@( for i in $$(seq 1 15); do sleep 1; $(SOURCE_PSQL) -d postgres -c "SELECT pg_log_standby_snapshot()" >/dev/null 2>&1; done ) &
+	uv run monarch register --org-id $(ORG)
 	uv run monarch create-publication --org-id $(ORG)
 	uv run monarch snapshot --org-id $(ORG)
 	$(SOURCE_PSQL) -d source -c 'INSERT INTO "group" (project_id) VALUES (1)'

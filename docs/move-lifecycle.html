@@ -102,6 +102,9 @@
   path.edge.active { stroke: var(--blue); stroke-width: 2.2; opacity: 1;
                      stroke-dasharray: 7 5; animation: crawl 0.5s linear infinite; }
   path.edge.live { stroke-dasharray: 7 5; animation: crawl 1.4s linear infinite; }
+  /* scope edges are drawn child->spine (FK direction); reverse their crawl so flow
+     always reads spine-outward */
+  path.edge.up.active, path.edge.up.live { animation-direction: reverse; }
   path.edge.hi { opacity: 1; stroke-width: 2.2; }
   path.edge.dim { opacity: 0.08; }
   @keyframes crawl { to { stroke-dashoffset: -12; } }
@@ -383,7 +386,7 @@ function drawEdges() {
     const dy = down ? 30 : -30;
     const p = document.createElementNS("http://www.w3.org/2000/svg", "path");
     p.setAttribute("d", `M ${x1} ${y1} C ${x1} ${y1 + dy}, ${x2} ${y2 - dy}, ${x2} ${y2}`);
-    p.setAttribute("class", `edge ${e.kind}${e.cross ? " cross" : ""}`);
+    p.setAttribute("class", `edge ${e.kind}${e.cross ? " cross" : ""}${down ? "" : " up"}`);
     svg.appendChild(p);
     paths[`${e.from}->${e.to}`] = p;
     // labels stay hidden until a hover singles the edge out -- they pile up otherwise

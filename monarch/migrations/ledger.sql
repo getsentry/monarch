@@ -21,9 +21,11 @@ CREATE TABLE IF NOT EXISTS move_unit (
     move_id bigint NOT NULL REFERENCES move(id),
     unit    text   NOT NULL,
     -- the unit's pipe: is data flowing between the cells and does the pipe still exist.
-    -- stream_ended is written by teardown (finalize and abort alike) as it drops each slot
+    -- copied = the resting state between snapshot and stream: slot exists, retaining WAL,
+    -- nothing consuming yet. stream_ended is written by teardown (finalize and abort
+    -- alike) as it drops each slot
     status  text   NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending', 'copying', 'streaming', 'stream_ended')),
+        CHECK (status IN ('pending', 'copying', 'copied', 'streaming', 'stream_ended')),
     -- position in the unit's log at write-stop: pg = LSN, clickhouse = commit-log offset.
     -- written by the coordinator, all units in one transaction with the phase CAS to draining
     fence           text,

@@ -19,13 +19,15 @@ filter_batch call, so a native implementation can replace it wholesale if the ta
 """
 
 import select
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from psycopg import Connection, sql
 
-from .config import Cell, Database, Graph
+from .config import Cell, Graph
 from .decode import Change, Commit, Decoder
+from .move import MoveUnit, UnitStatus
 from psycopg2.extras import LogicalReplicationConnection, ReplicationCursor
 
 Membership = dict[str, set[int]]
@@ -33,10 +35,11 @@ Membership = dict[str, set[int]]
 
 @dataclass
 class StreamSource:
-    db: Database
+    store: str  # the mover unit; colocated stores are separate StreamSources on one database
     conn: Connection  # regular connection, for the decoder's type lookups
     repl: LogicalReplicationConnection
     slot: str
+    publications: str  # comma-separated, as pgoutput's publication_names option expects
 
 
 class Scope:
@@ -55,10 +58,13 @@ class Scope:
 
 @dataclass
 class _Stream:
-    db: Database
+    store: str
     cursor: ReplicationCursor
     tail: "TailFilter"
     pending: list[Change] = field(default_factory=list)
+
+
+HEARTBEAT_EVERY = 2.0  # seconds; a throttle, not a schedule -- busy loops don't write more
 
 
 def run_streams(
@@ -68,7 +74,7 @@ def run_streams(
     graph: Graph,
     membership: Membership,
     copiers: dict[str, Callable[[str], bool]],
-    publications: str,  # comma-separated, as pgoutput's publication_names option expects
+    units: dict[str, MoveUnit],  # store -> this mover's ledger row, for the heartbeat
 ) -> None:
     """Consume every source database's slot until interrupted -- the streams have no natural end
     before cutover. Apply, then ack, per stream: feedback flushes a commit's LSN only after its
@@ -86,15 +92,25 @@ def run_streams(
         cur.start_replication(
             slot_name=s.slot,
             decode=False,
-            options={"proto_version": "1", "publication_names": publications},
+            options={"proto_version": "1", "publication_names": s.publications},
         )
-        streams.append(_Stream(s.db, cur, TailFilter(Decoder(s.conn), graph, scope)))
-    names = ", ".join(st.db.dbname for st in streams)
+        streams.append(_Stream(s.store, cur, TailFilter(Decoder(s.conn), graph, scope)))
+        # do-then-record: streaming only once this slot really has a consumer. False on a
+        # restart (already streaming) -- carry on, no duplicate journal line
+        units[s.store].transition(UnitStatus.STREAMING, note=f"consuming {s.slot}")
+    names = ", ".join(st.store for st in streams)
     print(f"\nstream: consuming slots on [{names}] for org changes (Ctrl-C to stop)\n")
     # read_message + select instead of consume_stream: consume_stream is one long-running C
     # call, and Python only delivers Ctrl-C between bytecode instructions -- so it can't be
     # interrupted. select() returns control to the interpreter on a signal.
+    last_beat = 0.0
     while True:
+        # clock-driven, not data-driven: a healthy mover on an idle org still beats, and a
+        # dead one stops -- staleness of heartbeat_at is the dashboard's dead-mover signal
+        if (now := time.monotonic()) - last_beat >= HEARTBEAT_EVERY:
+            for st in streams:
+                units[st.store].heartbeat()
+            last_beat = now
         idle = True
         for st in streams:
             if (msg := st.cursor.read_message()) is None:

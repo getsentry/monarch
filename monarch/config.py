@@ -58,6 +58,11 @@ class Graph:
         except graphlib.CycleError as e:
             raise ValueError(f"cycle in table graph: {e.args[1]}") from None
 
+    def store_tables(self, store: str) -> list[str]:
+        """The store's tables in graph order -- the store is the mover unit, so this is
+        one mover's territory."""
+        return [t for t in self.topological_sort() if self.store_of[t] == store]
+
     def scope_edge(self, table: str) -> Edge | None:
         """The non-nullable edge scoping `table` to a parent -- such a column is on every row, so
         one edge fully scopes the table. None for the root or a table with no such edge. Shared

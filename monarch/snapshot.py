@@ -4,15 +4,17 @@ from dataclasses import dataclass
 
 from psycopg import Connection, IsolationLevel, sql
 
-from .config import Cell, Database, Graph
+from .config import Cell, Graph
 from .stream import Membership
 
 
 @dataclass
 class Source:
-    """A pinned source database. Its connection must stay inside the slot guard (cli.py)."""
+    """One store's pinned read (the store is the mover unit; colocated stores hold separate
+    connections to their shared database, each on its own exported snapshot). The connection
+    must stay inside the slot guard (cli.py)."""
 
-    db: Database
+    store: str
     conn: Connection
     snapshot: str  # the slot's exported snapshot name
 
@@ -120,13 +122,15 @@ def run_snapshot(
     root_id: int,
     copiers: dict[str, Callable[[str], bool]],
 ) -> Membership:
-    """Run the snapshot across every source database: parents-first scoped queries collecting
+    """Run the snapshot across every store: parents-first scoped queries collecting
     in-scope keys per table -- the keys dict is shared, so a table's predicate can consume
-    parent keys read from another database -- then copy each table's rows to its sink database.
+    parent keys read from another store -- then copy each table's rows to its sink database.
 
-    Each source database is read in one REPEATABLE READ transaction pinned to its own slot's
-    exported snapshot: consistent per database. The databases' consistent points differ
-    slightly; each database's stream resumes exactly at its own, so nothing is missed. Sink
+    Each store is read in one REPEATABLE READ transaction pinned to its own slot's
+    exported snapshot: consistent per store. The stores' consistent points differ
+    slightly (even colocated ones -- separate slots); each store's stream resumes exactly
+    at its own, so nothing is missed; cross-store edges stay safe because they bind only
+    the frozen spine. Sink
     writes are one transaction per sink database -- atomic per database, not across them
     (that would need 2PC).
 
@@ -135,7 +139,7 @@ def run_snapshot(
     later state -- re-deriving it at stream start would silently drop deletes of rows that
     vanished in between."""
     print(f"snapshot: scoping org {root_id}\n")
-    source_for = {t: s.conn for s in sources for t in s.db.tables(graph)}
+    source_for = {t: s.conn for s in sources for t in graph.store_tables(s.store)}
     sink_for = {t: sinks[db.dsn] for db in sink.databases for t in db.tables(graph)}
     for s in sources:
         s.conn.isolation_level = IsolationLevel.REPEATABLE_READ

@@ -19,15 +19,17 @@ from psycopg2.extras import LogicalReplicationConnection
 from .config import Graph
 
 
-def publication_names(org_id: int) -> list[str]:
-    """The org's publication pair (per-org, like the slots: the filters embed the org's ids).
-    _ins publishes only inserts and carries every row filter: a publication that never
-    publishes update/delete may filter on any column -- no replica identity constraint, so
-    no schema cooperation is needed. _mut publishes update/delete/truncate unfiltered; WAL
-    holds a row's old image only as its replica-identity columns (id), so those operations
-    are not filterable without per-table index migrations -- TailFilter scopes them, as it
-    always has. Requires PG15+ (row filters and publish lists)."""
-    return [f"monarch_org_{org_id}_ins", f"monarch_org_{org_id}_mut"]
+def publication_names(org_id: int, store: str) -> list[str]:
+    """The store's publication pair (per-org per-store: the store is the mover unit, so
+    each store's slot subscribes only to its own tables -- colocated stores get separate
+    pairs on the same database). _ins publishes only inserts and carries every row filter:
+    a publication that never publishes update/delete may filter on any column -- no replica
+    identity constraint, so no schema cooperation is needed. _mut publishes
+    update/delete/truncate unfiltered; WAL holds a row's old image only as its
+    replica-identity columns (id), so those operations are not filterable without per-table
+    index migrations -- TailFilter scopes them, as it always has. Requires PG15+ (row
+    filters and publish lists)."""
+    return [f"monarch_org_{org_id}_{store}_ins", f"monarch_org_{org_id}_{store}_mut"]
 
 
 def build_row_filters(
@@ -93,16 +95,17 @@ def create_publications(
     admin: Connection,
     standby: Connection,
     org_id: int,
+    store: str,
     ins_filters: dict[str, str | None],
     mut_filters: dict[str, str | None],
 ) -> list[str]:
-    """Create the org's publication pair on the primary and wait until both replicate to
+    """Create one store's publication pair on the primary and wait until both replicate to
     the standby -- catalog objects, and the slot must only be created once pgoutput there
     can see them. Returns the executed DDL. Recreating an existing publication errors
     (DuplicateObject; there is no IF NOT EXISTS) and that's wanted: an existing one may
     hold stale frozen-id filters that would silently drop in-scope rows in the walsender,
     so it must be dropped explicitly, never reused."""
-    ins, mut = publication_names(org_id)
+    ins, mut = publication_names(org_id, store)
 
     def render(filters: dict[str, str | None]) -> str:
         return ",\n  ".join(f'"{t}" WHERE ({p})' if p else f'"{t}"' for t, p in filters.items())

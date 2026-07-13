@@ -1,11 +1,13 @@
 # Per-cell physical placement: each entry is one physical database (a DSN) and the logical
-# stores it hosts (see postgres_config.yaml for the stores themselves). The physical database
-# is the unit of machinery: its stores share one slot, snapshot, and stream.
+# stores it hosts (see postgres_config.yaml for the stores themselves). The STORE is the
+# unit of machinery: each store gets its own slot, snapshot, and stream -- colocated stores
+# tail their shared database's WAL separately (decode cost accepted; big cells don't
+# colocate), and the demo grants them no same-transaction coupling that split cells lack.
 #
 # The demo's source cell splits one store out to its own database, mirroring the fleet:
-#   default/attachments = the PG16 pair's "source" database
+#   default/attachments = the PG16 pair's "source" database (two slots, two movers)
 #   files               = the "source_files" database on the same pair
-# (monarch reads/decodes both on the standby; slots and streams are per database either way)
+# (monarch reads/decodes everything on the standby)
 #   sink                = the PG14 instance; all stores colocated in the one "sink" database
 cells:
   source:
