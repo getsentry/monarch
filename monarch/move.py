@@ -8,6 +8,7 @@ trails the cells (no shared transaction exists): movers do, then record, and eve
 transition stays re-derivable from the cells on restart."""
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 
 from psycopg import Connection
@@ -21,6 +22,7 @@ class Phase(StrEnum):
     ACTIVE = "active"
     DRAINING = "draining"
     CUT_OVER = "cut_over"
+    FAILED = "failed"
     FINALIZED = "finalized"
     REVERTING = "reverting"
     ABORTED = "aborted"
@@ -54,10 +56,11 @@ class UnitStatus(StrEnum):
 # enough?) are the caller's conditions for *attempting* a transition; these maps only
 # define which transitions exist.
 MOVE_TRANSITIONS: dict[Phase, set[Phase]] = {
-    Phase.ACTIVE: {Phase.DRAINING, Phase.ABORTED},
-    Phase.DRAINING: {Phase.CUT_OVER, Phase.ABORTED},
-    Phase.CUT_OVER: {Phase.FINALIZED, Phase.REVERTING},
-    Phase.REVERTING: {Phase.ABORTED},
+    Phase.ACTIVE: {Phase.DRAINING, Phase.FAILED, Phase.ABORTED},
+    Phase.DRAINING: {Phase.CUT_OVER, Phase.FAILED, Phase.ABORTED},
+    Phase.CUT_OVER: {Phase.FINALIZED, Phase.REVERTING, Phase.FAILED},
+    Phase.REVERTING: {Phase.FAILED, Phase.ABORTED},
+    Phase.FAILED: {Phase.ABORTED},
     Phase.FINALIZED: set(),
     Phase.ABORTED: set(),
 }
@@ -197,13 +200,19 @@ class MoveUnit:
             (rows, self.move.id, self.unit),
         )
 
-    def heartbeat(self) -> None:
+    def heartbeat(
+        self, applied: str | None = None, head: str | None = None,
+        last_commit_at: datetime | None = None,
+    ) -> None:
         """Liveness, overwritten on a clock: the mover can't announce its death, so it
-        announces being alive and staleness becomes the signal. Advisory gauge -- never
+        announces being alive and staleness becomes the signal. Position gauges ride the
+        same beat; COALESCE keeps last-known values across quiet beats. Advisory -- never
         read by transitions."""
         self.move.conn.execute(
-            "UPDATE move_unit SET heartbeat_at = now() WHERE move_id = %s AND unit = %s",
-            (self.move.id, self.unit),
+            "UPDATE move_unit SET heartbeat_at = now(), applied = COALESCE(%s, applied),"
+            " head = COALESCE(%s, head), last_commit_at = COALESCE(%s, last_commit_at)"
+            " WHERE move_id = %s AND unit = %s",
+            (applied, head, last_commit_at, self.move.id, self.unit),
         )
 
     def add_event(self, message: str) -> None:

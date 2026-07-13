@@ -15,6 +15,7 @@ use cases.
 
 import struct
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from psycopg import Connection
@@ -23,6 +24,8 @@ Op = Literal["INSERT", "UPDATE", "DELETE"]
 
 _U16 = struct.Struct(">H")
 _U32 = struct.Struct(">I")
+_U64 = struct.Struct(">Q")
+_PG_EPOCH = datetime(2000, 1, 1, tzinfo=timezone.utc)
 
 
 @dataclass
@@ -50,8 +53,20 @@ class Change:
         return int(value) if value is not None else None
 
 
+@dataclass
 class Commit:
     """End of a source transaction: the changes since the last Commit apply atomically."""
+
+    ts: datetime  # source commit time
+
+
+@dataclass
+class Truncate:
+    """A table-level operation. The mover can detect it, but cannot org-scope it."""
+
+    tables: list[str]
+    cascade: bool
+    restart_identity: bool
 
 
 @dataclass
@@ -71,7 +86,7 @@ class Decoder:
         self.types: dict[int, str] = dict(rows)
         self.relations: dict[int, _Relation] = {}
 
-    def decode(self, data: bytes) -> Change | Commit | None:
+    def decode(self, data: bytes) -> Change | Commit | Truncate | None:
         """One message -> a row change or a Commit marker; None for the rest
         (begin/relation/origin/type)."""
         b = _Buf(data)
@@ -114,9 +129,21 @@ class Decoder:
             b.u8()  # 'K' (key only, default replica identity) or 'O' (full old row)
             cols, _ = self._read_tuple(rel, b)  # key tuples carry no TOAST to omit
             return Change(rel.table, "DELETE", cols)
+        if kind == ord("T"):
+            count = b.u32()
+            options = b.u8()
+            tables = [self._relation(b.u32()).table for _ in range(count)]
+            return Truncate(
+                tables,
+                cascade=bool(options & 0x01),
+                restart_identity=bool(options & 0x02),
+            )
         if kind == ord("C"):
-            return Commit()
-        if kind in b"BOTM":  # begin/origin/truncate/message
+            b.u8()  # flags
+            b.u64()  # commit lsn
+            b.u64()  # end lsn
+            return Commit(_PG_EPOCH + timedelta(microseconds=b.u64()))
+        if kind in b"BOM":  # begin/origin/message
             return None
         raise ValueError(f"unknown pgoutput message kind {chr(kind)!r}")
 
@@ -172,6 +199,9 @@ class _Buf:
 
     def u32(self) -> int:
         return _U32.unpack(self.bytes(4))[0]
+
+    def u64(self) -> int:
+        return _U64.unpack(self.bytes(8))[0]
 
     def cstr(self) -> str:
         end = self.data.index(0, self.pos)

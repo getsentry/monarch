@@ -6,9 +6,10 @@ SNAPSHOT and reads exactly the pre-slot state, so snapshot and stream meet at th
 consistent point: nothing missed, nothing seen by both. Duplicates now come only from crash
 re-delivery on the stream side, still absorbed by idempotent apply."""
 
+import threading
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 
 import psycopg
 import psycopg2
@@ -137,6 +138,35 @@ def drop_publication(conn: Connection, name: str) -> None:
 
 def connect_replication(dsn: str) -> LogicalReplicationConnection:
     return psycopg2.connect(dsn, connection_factory=LogicalReplicationConnection)
+
+
+@contextmanager
+def nudge_running_xacts(primary_dsns: list[str]) -> Iterator[None]:
+    """Run pg_log_standby_snapshot() once a second on each primary while slots are being
+    created on its standby: a standby slot finds its consistent point only when a
+    running-xacts record arrives over physical replication, and an idle primary may not
+    emit one for minutes. Harmless on a busy primary (PG16+, which decode-on-standby
+    already requires)."""
+    if not primary_dsns:
+        yield
+        return
+    stop = threading.Event()
+
+    def nudge() -> None:
+        with ExitStack() as stack:
+            conns = [stack.enter_context(psycopg.connect(d, autocommit=True)) for d in primary_dsns]
+            while not stop.is_set():
+                for conn in conns:
+                    conn.execute("SELECT pg_log_standby_snapshot()")
+                stop.wait(1)
+
+    thread = threading.Thread(target=nudge, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join()
 
 
 @contextmanager

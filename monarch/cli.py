@@ -81,7 +81,7 @@ def read_frozen_ids(
 def cmd_create_publication(org_id: int, graph: Graph, source: Cell, ledger_dsn: str) -> None:
     # One publication pair per store (the store is the mover unit; colocated stores get
     # separate pairs on the same database). DDL runs on each hosting database's primary
-    # (ddl_dsn); create_publications then waits for the catalog rows to replicate to the
+    # (primary_dsn); create_publications then waits for the catalog rows to replicate to the
     # standby, where pgoutput reads them. Run against a registered move, each pair is
     # journaled per unit -- the fact snapshot's conductor gate sequences on (publication
     # existence itself lives in the cell; the journal records that the step happened).
@@ -96,7 +96,7 @@ def cmd_create_publication(org_id: int, graph: Graph, source: Cell, ledger_dsn: 
                 ins_filters, mut_filters = slot.build_row_filters(
                     graph, graph.store_tables(store), org_id, frozen_ids, conns[db.dsn]
                 )
-                with closing(connect(db.ddl_dsn)) as admin:
+                with closing(connect(db.primary_dsn or db.dsn)) as admin:
                     try:
                         statements = slot.create_publications(
                             admin, conns[db.dsn], org_id, store, ins_filters, mut_filters
@@ -158,20 +158,26 @@ def cmd_snapshot(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: 
                         if not slot.publication_exists(conns[db.dsn], name):
                             sys.exit(f"publication {name} missing on {db.dbname}")
             sources = []
-            for db in source.databases:
-                for store in db.stores:
-                    name = slot_name(org_id, store)
-                    lsn, snapshot = stack.enter_context(slot.create_slot(db.dsn, name))
-                    print(f"slot {name} created at LSN {lsn} (snapshot {snapshot})")
-                    unit = move.MoveUnit(m, store)
-                    unit.transition(move.UnitStatus.COPYING, note=f"slot {name} at {lsn}")
-                    # each store gets its own pinned connection -- colocated stores read
-                    # their shared database on separate exported snapshots
-                    sconn = stack.enter_context(connect(db.dsn))
-                    unit.record_copy_estimate(
-                        estimate_rows(sconn, graph, graph.store_tables(store), org_id, frozen_ids)
-                    )
-                    sources.append(Source(store, sconn, snapshot))
+            # slot creation on a standby blocks until a running-xacts record arrives from
+            # the primary over physical replication -- an idle primary may not emit one for
+            # minutes, so drip them ourselves until every slot has its consistent point.
+            # primary_dsn set = decode happens on a standby; a plain primary needs no nudge
+            primary_dsns = [db.primary_dsn for db in source.databases if db.primary_dsn]
+            with slot.nudge_running_xacts(primary_dsns):
+                for db in source.databases:
+                    for store in db.stores:
+                        name = slot_name(org_id, store)
+                        lsn, snapshot = stack.enter_context(slot.create_slot(db.dsn, name))
+                        print(f"slot {name} created at LSN {lsn} (snapshot {snapshot})")
+                        unit = move.MoveUnit(m, store)
+                        unit.transition(move.UnitStatus.COPYING, note=f"slot {name} at {lsn}")
+                        # each store gets its own pinned connection -- colocated stores read
+                        # their shared database on separate exported snapshots
+                        sconn = stack.enter_context(connect(db.dsn))
+                        unit.record_copy_estimate(
+                            estimate_rows(sconn, graph, graph.store_tables(store), org_id, frozen_ids)
+                        )
+                        sources.append(Source(store, sconn, snapshot))
             print()
             membership = run_snapshot(sources, sinks, sink, graph, org_id, blob_copiers(graph, source, sink))
             save_membership(org_id, membership)
@@ -210,9 +216,16 @@ def cmd_stream(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: st
                 repl = stack.enter_context(closing(slot.connect_replication(db.dsn)))
                 pubs = ",".join(slot.publication_names(org_id, store))
                 sources.append(StreamSource(store, conn, repl, slot_name(org_id, store), pubs))
-        run_streams(
-            sources, sinks, sink, graph, membership, blob_copiers(graph, source, sink), units
-        )
+        try:
+            run_streams(
+                sources, sinks, sink, graph, membership, blob_copiers(graph, source, sink), units
+            )
+        except KeyboardInterrupt:
+            # a clean stop can announce itself (a crash can't -- staleness covers that);
+            # status stays streaming: the pipe exists, the slot retains WAL for the resume
+            for unit in units.values():
+                unit.add_event("mover stopped: slot released, WAL retained")
+            raise
 
 
 def cmd_evict(org_id: int, graph: Graph, cell: Cell) -> None:
@@ -288,7 +301,7 @@ def main() -> None:
                         print(f"slot {slot_name(args.org_id, store)} dropped")
         case "drop-publication":
             for db in cells[args.source].databases:
-                with connect(db.ddl_dsn) as admin:
+                with connect(db.primary_dsn or db.dsn) as admin:
                     for store in db.stores:
                         for name in slot.publication_names(args.org_id, store):
                             slot.drop_publication(admin, name)

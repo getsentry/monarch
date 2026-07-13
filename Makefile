@@ -29,7 +29,7 @@ databases:
 
 # Each source database gets only its stores' tables, mirroring fleet.yaml; the sink colocates
 # every store so it gets them all. Publications are per-org and created by `monarch snapshot`
-# on the primary (admin_dsn in fleet.yaml); as catalog objects they replicate physically to
+# on the primary (primary_dsn in fleet.yaml); as catalog objects they replicate physically to
 # the standby where pgoutput reads them.
 schema: databases
 	-uv run python mock_storages/generate_schema.py default attachments | $(SOURCE_PSQL) -d source
@@ -84,13 +84,11 @@ opt-in-group:
 	$(SOURCE_PSQL) -d source -c 'CREATE UNIQUE INDEX IF NOT EXISTS group_ri ON "group" (id, project_id)'
 	$(SOURCE_PSQL) -d source -c 'ALTER TABLE "group" REPLICA IDENTITY USING INDEX group_ri'
 
-# Full move demo: snapshot, poke changes, stream them, clean up. Snapshot reads + slots live on
-# the standby; pg_log_standby_snapshot() nudges a running-xacts record so slot creation succeeds
-# (not an issue on a busy prod primary).
+# Full move demo: snapshot, poke changes, stream them, clean up. Snapshot reads + slots
+# live on the standby (cmd_snapshot nudges pg_log_standby_snapshot for slot creation).
 # Includes a TOAST field: ship a big out-of-line value, then an update that doesn't touch it -- pgoutput
 # omits the unchanged column from the second change and the sink's copy must survive.
 demo: opt-in-group
-	@( for i in $$(seq 1 15); do sleep 1; $(SOURCE_PSQL) -d postgres -c "SELECT pg_log_standby_snapshot()" >/dev/null 2>&1; done ) &
 	uv run monarch register --org-id $(ORG)
 	uv run monarch create-publication --org-id $(ORG)
 	uv run monarch snapshot --org-id $(ORG)

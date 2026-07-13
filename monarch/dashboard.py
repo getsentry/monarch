@@ -6,10 +6,11 @@ one_active_move index makes "the" well-defined), falling back to the most recent
 finished move; GET /state?move=N pins a specific move -- an old one renders its frozen
 story exactly as it happened, the journal being append-only. Events return with
 id > `since`, so the page accumulates the feed incrementally. GET / serves the page.
-POST /register is the one write: it books a move -- a pure ledger insert (the conductor's
-first real button), so the never-touches-a-cell rule survives it."""
+POST /register and /abort are the ledger writes: register books a move (a pure insert),
+abort is the phase CAS that kills one -- the never-touches-a-cell rule survives both."""
 
 import json
+import signal
 import subprocess
 import sys
 from datetime import datetime
@@ -24,6 +25,9 @@ from psycopg.rows import dict_row
 
 from . import move
 from .config import BlobStore, Cell, Graph
+
+_stream_proc: subprocess.Popen | None = None  # the last stream child; dies with us (one
+# process group), so a stale handle can't outlive a restart
 
 
 def describe_topology(graph: Graph, cells: dict[str, Cell]) -> dict:
@@ -130,6 +134,24 @@ def read_moves(conn: Connection) -> dict:
     return {"moves": moves}
 
 
+def resume_stream(conn: Connection) -> None:
+    """Startup reconcile: a dashboard Ctrl-C takes its spawned movers with it (one
+    foreground process group), so a restart may find units `streaming` with nobody
+    behind them -- respawn unconditionally. No liveness check needed: slots are
+    single-consumer, so a duplicate mover loses the acquisition and exits."""
+    row = conn.execute(
+        "SELECT root_id FROM move WHERE phase = 'active' AND EXISTS"
+        " (SELECT 1 FROM move_unit WHERE move_id = move.id AND status = 'streaming')"
+    ).fetchone()
+    if row is None:
+        return
+    global _stream_proc
+    _stream_proc = subprocess.Popen(
+        [sys.executable, "-m", "monarch.cli", "stream", "--org-id", str(row[0])]
+    )
+    print(f"{datetime.now():%H:%M:%S} resuming stream for org {row[0]} (pid {_stream_proc.pid})")
+
+
 def _to_json(payload: dict) -> bytes:
     return json.dumps(
         payload, default=lambda o: o.isoformat() if isinstance(o, datetime) else str(o)
@@ -161,6 +183,10 @@ class Handler(BaseHTTPRequestHandler):
             self._spawn_step(body, "snapshot")
         elif path == "/stream":
             self._spawn_step(body, "stream")
+        elif path == "/stop-stream":
+            self._stop_stream()
+        elif path == "/abort":
+            self._abort(body)
         else:
             self._respond(404, "text/plain", b"not found")
 
@@ -181,6 +207,33 @@ class Handler(BaseHTTPRequestHandler):
                           _to_json({"error": "a live move already exists — one move at a time"}))
             return
         self._respond(200, "application/json", _to_json({"id": m.id}))
+
+    def _stop_stream(self) -> None:
+        global _stream_proc
+        if _stream_proc is None or _stream_proc.poll() is not None:
+            self._respond(409, "application/json",
+                          _to_json({"error": "no stream child of this dashboard — started elsewhere? kill it directly"}))
+            return
+        _stream_proc.send_signal(signal.SIGINT)
+        try:
+            _stream_proc.wait(timeout=10)  # usually sub-second; polls just queue behind it
+        except subprocess.TimeoutExpired:
+            self._respond(202, "application/json",
+                          _to_json({"error": "SIGINT sent but exit unconfirmed"}))
+            return
+        self._respond(200, "application/json", _to_json({"stopped": _stream_proc.pid}))
+
+    def _abort(self, body) -> None:
+        try:
+            move_id = int(body["move"])
+        except (KeyError, TypeError, ValueError):
+            self._respond(400, "application/json", _to_json({"error": "expected {move}"}))
+            return
+        if move.Move(self.conn, move_id).transition(move.Phase.ABORTED, note="operator abort"):
+            self._respond(200, "application/json", _to_json({"aborted": move_id}))
+        else:
+            self._respond(409, "application/json",
+                          _to_json({"error": "nothing abortable — the phase moved on"}))
 
     def _spawn_step(self, body, command: str) -> None:
         """Spawn a CLI step as a child of the dashboard: it can't run in-process (long work
@@ -205,6 +258,9 @@ class Handler(BaseHTTPRequestHandler):
         if command == "create-publication":  # snapshot's route comes from the move row
             args += ["--from", row[1]]
         proc = subprocess.Popen(args)
+        if command == "stream":
+            global _stream_proc
+            _stream_proc = proc
         print(f"{datetime.now():%H:%M:%S} spawned `monarch {' '.join(args[3:])}` (pid {proc.pid})")
         self._respond(202, "application/json", _to_json({"spawned": command}))
 
@@ -214,7 +270,11 @@ class Handler(BaseHTTPRequestHandler):
             qs = parse_qs(url.query)
             since = int(qs.get("since", ["0"])[0])
             move_id = int(qs["move"][0]) if "move" in qs else None
-            self._respond(200, "application/json", _to_json(read_state(self.conn, since, move_id)))
+            state = read_state(self.conn, since, move_id)
+            # process truth from the parent: exact and instant for children we spawned;
+            # a mover started elsewhere is invisible (its duplicate spawn loses the slot)
+            state["movers_alive"] = _stream_proc is not None and _stream_proc.poll() is None
+            self._respond(200, "application/json", _to_json(state))
         elif url.path == "/moves":
             self._respond(200, "application/json", _to_json(read_moves(self.conn)))
         elif url.path == "/orgs":
@@ -246,6 +306,7 @@ class Handler(BaseHTTPRequestHandler):
 def run_dashboard(conn: Connection, port: int, graph: Graph, cells: dict[str, Cell]) -> None:
     """Single-threaded on purpose: one shared ledger connection, one polling client."""
     topology = describe_topology(graph, cells)
+    resume_stream(conn)
     server = HTTPServer(("127.0.0.1", port), partial(Handler, conn, topology, graph, cells))
     print(f"dashboard: http://127.0.0.1:{port}")
     server.serve_forever()

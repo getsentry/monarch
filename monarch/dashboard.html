@@ -191,6 +191,10 @@
         <h2>snapshot</h2>
         <div id="snaprows"></div>
       </article>
+      <article class="card" id="streamcard">
+        <h2>stream</h2>
+        <div id="streamrows"></div>
+      </article>
       <article class="card" id="movescard">
         <h2>moves</h2>
         <div id="mvrows"></div>
@@ -219,6 +223,14 @@ const $ = id => document.getElementById(id);
 const PILL = { active: "run", draining: "warn", cut_over: "warn",
                finalized: "ok", reverting: "bad", aborted: "bad" };
 const fmt = n => Number(n).toLocaleString("en-US");
+const fmtBytes = n => n < 1024 ? `${n} B`
+  : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
+// pg_lsn "X/Y" -> bytes; Number stays exact far past any demo's WAL position
+const lsnBytes = t => parseInt(t.split("/")[0], 16) * 2 ** 32 + parseInt(t.split("/")[1], 16);
+const lagBytes = u => u.head && u.applied ? Math.max(0, lsnBytes(u.head) - lsnBytes(u.applied)) : null;
+const FRESH_MS = 15000;  // heartbeat age past which a mover reads as dead
+const LAG_GATE_BYTES = 1 << 24;  // 16 MB, one WAL segment -- the demo's "caught up" bar
+const fresh = u => u.heartbeat_at && Date.now() - new Date(u.heartbeat_at) < FRESH_MS;
 const post = async (path, payload) => {
   const res = await fetch(path, { method: "POST",
     headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
@@ -235,6 +247,7 @@ if (pinned) {
   $("movescard").style.display = "none";
 } else {
   $("snap").style.display = "none";
+  $("streamcard").style.display = "none";
   document.querySelector(".feed").style.display = "none";
   $("pill").style.display = "none";
   $("back").style.display = "none";
@@ -302,6 +315,22 @@ function renderSnapshot(units) {
     `<div class="kv"><span>${u.unit}</span><span>${snapLine(u)}</span></div>`).join("");
 }
 
+function streamLine(u) {
+  if (u.status === "stream_ended") return "pipe closed";
+  if (u.status !== "streaming") return "not streaming yet";
+  const lag = lagBytes(u);
+  if (lag == null) return "streaming — no positions yet";
+  let s = `lag ${fmtBytes(lag)} · applied ${u.applied}`;
+  if (u.last_commit_at)
+    s += ` · last commit ${Math.round((Date.now() - new Date(u.last_commit_at)) / 1000)}s ago`;
+  return s;
+}
+
+function renderStream(units) {
+  $("streamrows").innerHTML = units.map(u =>
+    `<div class="kv"><span>${u.unit}</span><span>${streamLine(u)}</span></div>`).join("");
+}
+
 function appendEvents(events) {
   const ol = $("feed");
   for (const e of events) {
@@ -346,9 +375,11 @@ async function poll() {
   $("pill").className = `pill ${PILL[m.phase] ?? ""}`;
   lastMove = m;
   lastUnits = state.units;
+  moversAlive = !!state.movers_alive;
   tintStores(m, state.units);
   appendEvents(state.events);
   renderSnapshot(state.units);
+  renderStream(state.units);
   renderActions();
 }
 
@@ -413,9 +444,6 @@ $("actions-toggle").addEventListener("click", () => $("drawer").classList.toggle
 if (pinned) $("orgpick").style.display = "none";  // pre-move: picking happens on the index
 $("orgpick").addEventListener("change", renderActions);
 
-const aliveCount = () => lastUnits.filter(u =>
-  u.heartbeat_at && (Date.now() - new Date(u.heartbeat_at)) / 1000 <= 15).length;
-
 // each action: arm() returns null when armed, else the unmet gate (tooltip text).
 // pre-move actions live on the index page only -- a move id exists only after
 // registration, so a move's page can't host the actions that precede it.
@@ -471,14 +499,22 @@ const ACTIONS = [
     // copied = fresh start; streaming with no live movers = restart after a stop/crash
     arm: m => !m || m.phase !== "active" ? "needs an active move"
       : !lastUnits.every(u => ["copied", "streaming"].includes(u.status)) ? "run snapshot first"
-      : aliveCount() > 0 ? "movers are already running" : null },
-  { label: "stop stream", would: "SIGINT the stream child — heartbeats go stale (the dead-mover demo)",
-    arm: m => aliveCount() > 0 ? null : "no live movers" },
+      : moversAlive ? "movers are already running" : null },
+  { label: "stop stream",
+    run: async note => {
+      const { ok, status, body } = await post("/stop-stream", {});
+      if (!ok) { note(body.error ?? `failed (${status}) — restart \`monarch dashboard\`?`); return false; }
+      note("stream stopped — exit confirmed; abort and restart are armed");
+      return true;
+    },
+    arm: m => moversAlive ? null : "no live movers" },
   { label: "fence → draining", would: "stop org writes*, capture per-store fence LSNs + phase CAS in one ledger txn (*mock: write-stop not built — the journal would say so)",
     arm: m => {
       if (!m || m.phase !== "active") return "needs an active move";
       if (!lastUnits.every(u => u.status === "streaming")) return "every store must be streaming";
-      if (aliveCount() < lastUnits.length) return "all movers must be alive (dead reporter = meaningless lag)";
+      if (!moversAlive) return "the mover must be alive (dead reporter = meaningless lag)";
+      const lagging = lastUnits.filter(u => (lagBytes(u) ?? Infinity) >= LAG_GATE_BYTES);
+      if (lagging.length) return `stream must catch up — lagging: ${lagging.map(u => u.unit).join(", ")}`;
       return null;
     } },
   { label: "cut over", would: "verify + flip routing, phase → cut_over (source keeps the frozen copy)",
@@ -490,8 +526,14 @@ const ACTIONS = [
     would: "flip routing back, POST-FLIP SINK WRITES LOST, phase → reverting",
     arm: m => !m || m.phase !== "cut_over" ? "only possible from cut_over, before finalize" : null },
   { label: "abort move", danger: true,
-    would: "phase → aborted (lossless — org never left the source); sink scrub is post-terminal cleanup",
-    arm: m => m && ["active", "draining"].includes(m.phase) ? null : "nothing abortable" },
+    run: async note => {
+      const { ok, status, body } = await post("/abort", { move: +pinned });
+      if (!ok) { note(body.error ?? `failed (${status}) — restart \`monarch dashboard\`?`); return false; }
+      note("aborted — org never left the source; slots/publications + sink scrub are post-terminal cleanup (CLI)");
+      return true;
+    },
+    arm: m => !m || !["active", "draining"].includes(m.phase) ? "nothing abortable"
+      : moversAlive ? "stop the stream first — movers are still alive" : null },
 ];
 
 // fired-but-not-yet-landed latch: a clicked run() button stays disabled until its effect
@@ -534,7 +576,8 @@ $("actionbtns").addEventListener("click", async e => {
 
 // ---- popovers: the diagram stays sparse; context lives in hover, built at hover time
 // from config (topo) + the latest poll (lastMove/lastUnits) so it's always current
-let lastMove = null, lastUnits = [];
+// moversAlive is the parent's process truth (the dashboard's own stream child), via /state
+let lastMove = null, lastUnits = [], moversAlive = false;
 
 function storeTip(s) {
   const cell = lastMove?.source_cell ?? Object.keys(topo.placement)[0];
@@ -562,9 +605,10 @@ function storeTip(s) {
     else if (u.copy_rows_estimate != null) lines += ` · ~${fmt(u.copy_rows_estimate)} rows expected`;
     if (u.heartbeat_at) {
       const age = Math.round((Date.now() - new Date(u.heartbeat_at)) / 1000);
-      lines += `<br>mover: ` + (age <= 15 ? `<b>alive</b> — heartbeat ${age}s ago`
-        : `<b>no heartbeat for ${age}s</b> — dead or wedged`);
+      lines += `<br>mover: <b>${moversAlive ? "alive" : "not running"}</b> — last heartbeat ${age}s ago`;
     } else if (u.status !== "pending") lines += `<br>mover: no heartbeat yet`;
+    if (u.status === "streaming" && lagBytes(u) != null)
+      lines += `<br>stream: lag <b>${fmtBytes(lagBytes(u))}</b> — applied ${u.applied} · head ${u.head}`;
   }
   return lines + `<br>tables: ${s.tables.join(", ")}`;
 }
@@ -606,13 +650,15 @@ document.addEventListener("mousemove", e => {
 function tintStores(m, units) {
   // units ARE stores now (one grain everywhere), so no placement translation
   if (!topo) return;
-  const statusByUnit = Object.fromEntries(units.map(u => [u.unit, u.status]));
+  const byUnit = Object.fromEntries(units.map(u => [u.unit, u]));
   const flowing = new Set();
   for (const s of topo.stores) {
     if (s.kind === "blob") continue;
-    const status = statusByUnit[s.name];
+    const status = byUnit[s.name]?.status;
     if (!status) continue;
-    if (status === "copying" || status === "streaming") flowing.add(s.name);
+    // streaming flow is a liveness claim -- the edge animates only on a fresh heartbeat;
+    // copying stays status-keyed (the snapshot process doesn't beat)
+    if (status === "copying" || (status === "streaming" && fresh(byUnit[s.name]))) flowing.add(s.name);
     const el = $(`storest-${s.name}`);
     if (!el) continue;
     el.textContent = status.replace("_", " ");

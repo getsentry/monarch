@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS move (
     -- phases mark org-level semantic changes only (fenced, flipped, closed); unit progress
     -- is derived from move_unit rows, never stored here. born active: the insert is the lease
     phase       text        NOT NULL DEFAULT 'active'
-        CHECK (phase IN ('active', 'draining', 'cut_over', 'finalized', 'reverting', 'aborted')),
+        CHECK (phase IN ('active', 'draining', 'cut_over', 'failed', 'finalized', 'reverting', 'aborted')),
     created_at  timestamptz NOT NULL DEFAULT now(),
     updated_at  timestamptz NOT NULL DEFAULT now()
 );
@@ -16,6 +16,10 @@ CREATE TABLE IF NOT EXISTS move (
 -- only allow one active move at a time
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_move
     ON move ((true)) WHERE phase NOT IN ('finalized', 'aborted');
+
+ALTER TABLE move DROP CONSTRAINT IF EXISTS move_phase_check;
+ALTER TABLE move ADD CONSTRAINT move_phase_check
+    CHECK (phase IN ('active', 'draining', 'cut_over', 'failed', 'finalized', 'reverting', 'aborted'));
 
 CREATE TABLE IF NOT EXISTS move_unit (
     move_id bigint NOT NULL REFERENCES move(id),

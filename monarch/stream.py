@@ -22,12 +22,14 @@ import select
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
+from typing import NoReturn
 
 from psycopg import Connection, sql
 
 from .config import Cell, Graph
-from .decode import Change, Commit, Decoder
-from .move import MoveUnit, UnitStatus
+from .decode import Change, Commit, Decoder, Truncate
+from .move import MoveUnit, Phase, UnitStatus
 from psycopg2.extras import LogicalReplicationConnection, ReplicationCursor
 
 Membership = dict[str, set[int]]
@@ -61,10 +63,18 @@ class _Stream:
     store: str
     cursor: ReplicationCursor
     tail: "TailFilter"
+    unit: MoveUnit
     pending: list[Change] = field(default_factory=list)
+    applied_lsn: int = 0  # last flushed commit; 0 until the first commit is applied
+    last_commit_at: datetime | None = None
 
 
 HEARTBEAT_EVERY = 2.0  # seconds; a throttle, not a schedule -- busy loops don't write more
+
+
+def format_lsn(lsn: int) -> str:
+    """pg_lsn text form -- the ledger's fence/applied/head format."""
+    return f"{lsn >> 32:X}/{lsn & 0xFFFFFFFF:X}"
 
 
 def run_streams(
@@ -94,7 +104,9 @@ def run_streams(
             decode=False,
             options={"proto_version": "1", "publication_names": s.publications},
         )
-        streams.append(_Stream(s.store, cur, TailFilter(Decoder(s.conn), graph, scope)))
+        streams.append(
+            _Stream(s.store, cur, TailFilter(Decoder(s.conn), graph, scope), units[s.store])
+        )
         # do-then-record: streaming only once this slot really has a consumer. False on a
         # restart (already streaming) -- journal the resume as its own fact, not a fake
         # duplicate transition
@@ -108,10 +120,15 @@ def run_streams(
     last_beat = 0.0
     while True:
         # clock-driven, not data-driven: a healthy mover on an idle org still beats, and a
-        # dead one stops -- staleness of heartbeat_at is the dashboard's dead-mover signal
+        # dead one stops -- heartbeat_at is the ledger's liveness record (the dashboard's
+        # gates watch their own child process directly)
         if (now := time.monotonic()) - last_beat >= HEARTBEAT_EVERY:
             for st in streams:
-                units[st.store].heartbeat()
+                units[st.store].heartbeat(
+                    applied=format_lsn(st.applied_lsn) if st.applied_lsn else None,
+                    head=format_lsn(st.cursor.wal_end) if st.cursor.wal_end else None,
+                    last_commit_at=st.last_commit_at,
+                )
             last_beat = now
         idle = True
         for st in streams:
@@ -135,6 +152,8 @@ def apply_message(
         if isinstance(item, Change):
             st.pending.append(item)
             continue
+        if isinstance(item, Truncate):
+            fail_on_truncate(st, item)
         if st.pending:  # Commit: the buffered source transaction lands atomically per sink db
             by_sink: dict[Connection, list[Change]] = {}
             for change in st.pending:
@@ -150,6 +169,23 @@ def apply_message(
                         apply_change(conn, change)
             st.pending.clear()
         st.cursor.send_feedback(flush_lsn=msg.data_start)
+        st.applied_lsn = msg.data_start
+        st.last_commit_at = item.ts
+
+
+def fail_on_truncate(st: _Stream, truncate: Truncate) -> NoReturn:
+    tables = ", ".join(f'"{table}"' for table in truncate.tables)
+    details = []
+    if truncate.cascade:
+        details.append("cascade")
+    if truncate.restart_identity:
+        details.append("restart identity")
+    suffix = f" ({', '.join(details)})" if details else ""
+    note = f"unsupported TRUNCATE on {tables}{suffix}"
+    st.unit.add_event(f"fatal: {note}")
+    moved = st.unit.move.transition(Phase.FAILED, note=f"{st.store}: {note}")
+    outcome = "marked failed" if moved else "left in existing phase"
+    raise RuntimeError(f"{note}; move #{st.unit.move.id} {outcome}")
 
 
 class TailFilter:
@@ -163,14 +199,16 @@ class TailFilter:
         self.graph = graph
         self.scope = scope
 
-    def filter_batch(self, msgs) -> list[Change | Commit]:
+    def filter_batch(self, msgs) -> list[Change | Commit | Truncate]:
         """In-scope changes plus Commit markers (passed through: transaction boundaries are the
         apply/ack unit downstream)."""
-        out: list[Change | Commit] = []
+        out: list[Change | Commit | Truncate] = []
         for msg in msgs:
             match self.decoder.decode(msg):
                 case Commit() as commit:
                     out.append(commit)
+                case Truncate() as truncate:
+                    out.append(truncate)
                 case Change() as change:
                     out.extend(self._admit(change))
         return out

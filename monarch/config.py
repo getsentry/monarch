@@ -152,11 +152,7 @@ def load_graph(path: str) -> Graph:
 class Database:
     dsn: str
     stores: list[str]
-    admin_dsn: str | None = None  # DDL endpoint (the primary) when dsn is a standby
-
-    @property
-    def ddl_dsn(self) -> str:
-        return self.admin_dsn or self.dsn
+    primary_dsn: str | None = None  # where DDL runs when dsn is a standby; None = dsn is the primary
 
     @property
     def dbname(self) -> str:
@@ -188,7 +184,7 @@ def load_cells(path: str) -> dict[str, Cell]:
     return {
         name: Cell(
             name,
-            [Database(d["dsn"], d["stores"], d.get("admin_dsn")) for d in c["databases"]],
+            [Database(d["dsn"], d["stores"], d.get("primary_dsn")) for d in c["databases"]],
             c.get("blobs", {}),
         )
         for name, c in raw["cells"].items()
