@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS move (
     root_id     bigint      NOT NULL,  -- org id
     source_cell text        NOT NULL,
     sink_cell   text        NOT NULL,
-    -- phases mark org-level semantic changes only (fenced, flipped, closed); unit progress
+    -- phases mark org-level semantic changes only (write-stopped, flipped, closed); unit progress
     -- is derived from move_unit rows, never stored here. born active: the insert is the lease
     phase       text        NOT NULL DEFAULT 'active'
         CHECK (phase IN ('active', 'draining', 'cut_over', 'failed', 'finalized', 'reverting', 'aborted')),
@@ -30,12 +30,6 @@ CREATE TABLE IF NOT EXISTS move_unit (
     -- alike) as it drops each slot
     status  text   NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'copying', 'copied', 'streaming', 'stream_ended')),
-    -- position in the unit's log at write-stop: pg = LSN, clickhouse = commit-log offset.
-    -- written by the coordinator, all units in one transaction with the phase CAS to draining
-    fence           text,
-    -- when the mover's applied position crossed the fence; NULL = not yet. a latched fact,
-    -- not a status: the pipe keeps streaming (stragglers) after crossing
-    fence_passed_at timestamptz,
     -- the copy denominator, as two write-once facts: the planner's prediction at copy start
     -- (complete but inexact) and the actual at copy completion. UI divides by
     -- COALESCE(total, estimate); display only, nothing gates on either
@@ -43,15 +37,18 @@ CREATE TABLE IF NOT EXISTS move_unit (
     copy_rows_total    bigint,
     -- advisory gauges, overwritten each mover heartbeat; never read by transitions.
     -- stale heartbeat_at = the mover is dead or wedged
-    applied        text,         -- position applied to the sink (same format as fence)
+    applied        text,         -- position applied to the sink: pg = LSN, clickhouse = commit-log offset
     head           text,         -- source log head, from the feed (never polled)
     last_commit_at timestamptz,  -- source commit time of the last applied transaction
     heartbeat_at   timestamptz,
     PRIMARY KEY (move_id, unit)
 );
 
+ALTER TABLE move_unit DROP COLUMN IF EXISTS fence;
+ALTER TABLE move_unit DROP COLUMN IF EXISTS fence_passed_at;
+
 -- append-only journal for the dashboard feed and post-mortems: transitions,
--- fences, per-table counts, etc
+-- per-table counts, etc
 CREATE TABLE IF NOT EXISTS move_event (
     id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     move_id bigint      NOT NULL REFERENCES move(id),

@@ -108,7 +108,7 @@
                  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .snode .bind { font-size: 11px; color: var(--ink-2); margin-top: 2px; }
   .snode, .mini { cursor: default; }
-  /* actions (mock): outline while waiting -- unmet gates in the tooltip, never the
+  /* actions: outline while waiting -- unmet gates in the tooltip, never the
      label -- filled solid when armed; danger actions stay red */
   #actions-toggle { position: fixed; left: 18px; top: 18px; z-index: 20;
                       border: 1px solid var(--border); border-radius: 999px; padding: 7px 14px;
@@ -132,10 +132,6 @@
              background: var(--surface); color: var(--ink);
              border: 1px solid var(--border); }
   #orgpick:disabled { cursor: not-allowed; opacity: 0.55; }
-  #actions .mocknote { font-size: 11.5px; color: var(--ink-2); margin-top: 10px;
-                       min-height: 2.6em; font-style: italic; }
-  #actions h2 span { color: var(--muted); font-weight: 400; text-transform: none;
-                     letter-spacing: 0; }
   #tip { position: fixed; z-index: 10; display: none; max-width: 300px;
          background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
          padding: 8px 12px; font-size: 12px; line-height: 1.5; color: var(--ink-2);
@@ -207,13 +203,12 @@
 <button id="actions-toggle">actions</button>
 <div id="drawer">
   <article class="card" id="actions">
-    <h2>actions <span>· part mock</span></h2>
+    <h2>actions</h2>
     <!-- options load from GET /orgs, each cell's root table read live -->
     <select id="orgpick">
       <option value="">org to move…</option>
     </select>
     <div id="actionbtns"></div>
-    <div class="mocknote" id="mocknote">wired buttons run for real — the rest narrate what they would do</div>
   </article>
 </div>
 <div id="tip"></div>
@@ -438,8 +433,7 @@ function drawEdges() {
 }
 window.addEventListener("resize", drawEdges);
 
-// ---- actions (UI MOCK): availability is computed for real from live state -- these are
-// the future coordinator's gates, dry-run -- but clicks only narrate.
+// ---- actions: availability is computed from live state -- the future coordinator's gates.
 $("actions-toggle").addEventListener("click", () => $("drawer").classList.toggle("open"));
 if (pinned) $("orgpick").style.display = "none";  // pre-move: picking happens on the index
 $("orgpick").addEventListener("change", renderActions);
@@ -447,7 +441,7 @@ $("orgpick").addEventListener("change", renderActions);
 // each action: arm() returns null when armed, else the unmet gate (tooltip text).
 // pre-move actions live on the index page only -- a move id exists only after
 // registration, so a move's page can't host the actions that precede it.
-// an action with run() is wired for real; the rest narrate their `would` text
+// an action with run() is wired; the rest are inert until built (`would` = the plan)
 const ACTIONS = [
   { label: "register move", pre: true,
     run: async note => {
@@ -508,7 +502,7 @@ const ACTIONS = [
       return true;
     },
     arm: m => moversAlive ? null : "no live movers" },
-  { label: "fence → draining", would: "stop org writes*, capture per-store fence LSNs + phase CAS in one ledger txn (*mock: write-stop not built — the journal would say so)",
+  { label: "stop writes → draining", would: "stop org writes + phase CAS → draining (mock: write-stop not built — the journal would say so)",
     arm: m => {
       if (!m || m.phase !== "active") return "needs an active move";
       if (!lastUnits.every(u => u.status === "streaming")) return "every store must be streaming";
@@ -518,8 +512,12 @@ const ACTIONS = [
       return null;
     } },
   { label: "cut over", would: "verify + flip routing, phase → cut_over (source keeps the frozen copy)",
+    // drain-done is computed here, never stored: writes are stopped (phase says so), so
+    // applied catching head means every org write has landed on the sink
     arm: m => !m || m.phase !== "draining" ? "needs a draining move"
-      : lastUnits.every(u => u.fence_passed_at) ? null : "every store must be past its fence" },
+      : !moversAlive ? "the mover must be alive (dead reporter = stale positions)"
+      : lastUnits.every(u => (lagBytes(u) ?? Infinity) === 0) ? null
+      : "every store must be fully caught up (applied = head)" },
   { label: "finalize", would: "drop slots + publications, evict org from source, phase → finalized (true point of no return)",
     arm: m => !m || m.phase !== "cut_over" ? "needs a cut-over move" : null },
   { label: "revert — emergency", danger: true,
@@ -564,8 +562,8 @@ $("actionbtns").addEventListener("click", async e => {
   const b = e.target.closest("button[data-i]");
   if (!b) return;
   const a = ACTIONS[+b.dataset.i];
-  const note = t => { $("mocknote").textContent = t; };
-  if (!a.run) return note(`mock — would: ${a.would}`);
+  const note = t => console.log(t);
+  if (!a.run) return;
   fired.add(a.label);  // latch before the round-trip; run() reports whether it took
   renderActions();
   let ok = false;

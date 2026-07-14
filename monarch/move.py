@@ -16,7 +16,7 @@ from psycopg import Connection
 
 class Phase(StrEnum):
     """move.phase: the org-level spine, advanced by the coordinator. Phases mark org-level
-    semantic changes only (fenced, flipped, closed); copy/stream progress is the units'
+    semantic changes only (write-stopped, flipped, closed); copy/stream progress is the units'
     business and is derived from their rows, never stored here."""
 
     ACTIVE = "active"
@@ -32,8 +32,8 @@ class UnitStatus(StrEnum):
     """move_unit.status: the unit's pipe -- is data flowing between the cells and does the
     pipe still exist. copied is the resting state between snapshot and stream: the slot
     exists and retains WAL, but nothing is consuming -- streaming only when a stream
-    actually is. Data milestones live elsewhere: fence crossing is the fence_passed_at
-    fact column (the pipe keeps streaming after it -- stragglers), liveness is heartbeat_at.
+    actually is. Drain-done is a live comparison of applied against the source head at the
+    cut-over attempt, never stored; liveness is heartbeat_at.
     stream_ended is recorded by teardown (finalize and abort alike) as it drops each slot,
     do-then-record; pg_replication_slots stays ground truth if they ever disagree."""
 
@@ -52,9 +52,9 @@ class UnitStatus(StrEnum):
 # return) and cut_over -> reverting -> aborted, the emergency escape: routing flips back to
 # the source and every write the sink took since the flip is lost. A destination may have
 # several sources only when the transition means the same thing from each (aborted: move
-# dead, org on source; stream_ended: teardown). Gates (every unit past its fence? lag small
-# enough?) are the caller's conditions for *attempting* a transition; these maps only
-# define which transitions exist.
+# dead, org on source; stream_ended: teardown). Gates (writes stopped? every unit caught
+# up?) are the caller's conditions for *attempting* a transition; these maps only define
+# which transitions exist.
 MOVE_TRANSITIONS: dict[Phase, set[Phase]] = {
     Phase.ACTIVE: {Phase.DRAINING, Phase.FAILED, Phase.ABORTED},
     Phase.DRAINING: {Phase.CUT_OVER, Phase.FAILED, Phase.ABORTED},
@@ -145,8 +145,7 @@ class MoveUnit:
         """Guarded update of this mover's status; legal sources derive from the map (its
         multi-source destination, stream_ended, means the same thing from either source).
         pending -> copying doubles as the mover's claim: a duplicate mover loses the race
-        and gets False. Fences are not written here -- the coordinator records every unit's
-        fence in the same ledger transaction as the active -> draining phase CAS."""
+        and gets False."""
         sources = [str(s) for s, dests in MOVE_UNIT_TRANSITIONS.items() if to in dests]
         if not sources:
             raise ValueError(f"no transition leads to {to}")
@@ -162,24 +161,6 @@ class MoveUnit:
             if moved:
                 self.add_event(f"-> {to}" + (f": {note}" if note else ""))
         return moved
-
-    def mark_fence_passed(self) -> bool:
-        """Latch the mover's milestone: applied position crossed the unit's fence. A fact
-        column, not a status -- the pipe keeps streaming (stragglers) after crossing.
-        Requires the fence to be set; irreversible once latched."""
-        with self.move.conn.transaction():
-            passed = (
-                self.move.conn.execute(
-                    "UPDATE move_unit SET fence_passed_at = now()"
-                    " WHERE move_id = %s AND unit = %s"
-                    " AND fence IS NOT NULL AND fence_passed_at IS NULL",
-                    (self.move.id, self.unit),
-                ).rowcount
-                == 1
-            )
-            if passed:
-                self.add_event("fence passed")
-        return passed
 
     def record_copy_estimate(self, rows: int) -> None:
         """Write-once prediction of the copy's row count -- the progress-bar denominator

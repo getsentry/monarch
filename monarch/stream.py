@@ -73,7 +73,7 @@ HEARTBEAT_EVERY = 2.0  # seconds; a throttle, not a schedule -- busy loops don't
 
 
 def format_lsn(lsn: int) -> str:
-    """pg_lsn text form -- the ledger's fence/applied/head format."""
+    """pg_lsn text form -- the ledger's applied/head format."""
     return f"{lsn >> 32:X}/{lsn & 0xFFFFFFFF:X}"
 
 

@@ -6,8 +6,8 @@ PSQL := $(COMPOSE) exec -T postgres psql -U monarch -v ON_ERROR_STOP=1 -q
 SOURCE_PSQL := $(COMPOSE) exec -T primary psql -U monarch -v ON_ERROR_STOP=1 -q
 
 .PHONY: up down install databases schema data reset demo verify snapshot opt-in-group \
-	evict-source evict-sink psql-source psql-standby psql-files psql-sink psql-ledger \
-	rust-schema rust-data demo-rs
+	traffic evict-source evict-sink psql-source psql-standby psql-files psql-sink \
+	psql-ledger rust-schema rust-data demo-rs
 
 up:
 	$(COMPOSE) up -d
@@ -77,6 +77,12 @@ snapshot:
 	uv run monarch register --org-id $(ORG)
 	uv run monarch create-publication --org-id $(ORG)
 	uv run monarch snapshot --org-id $(ORG)
+
+# Trickle org-scoped writes into the source primaries so a live move has something to
+# stream (the first org is the mover's subject; org 2's writes must never cross). Run
+# beside the dashboard: stop stream while this runs = lag climbs; restart = catch-up.
+traffic:
+	PYTHONUNBUFFERED=1 uv run python mock_storages/traffic.py
 
 # Opt one update-heavy table into update/delete filtering for demo
 opt-in-group:

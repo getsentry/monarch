@@ -38,7 +38,7 @@ an interactive walkthrough of the end-to-end process.
   sink filestores are in their own folders. The move seeds the source side; the sink starts empty and
   is filled as data is copied across.
 - **Move ledger:** the `monarch_ledger` database holds monarch's own durable move state (phase,
-  fence LSNs) — never part of either cell, so cells stay monarch-unaware. It shares the sink's
+  unit progress) — never part of either cell, so cells stay monarch-unaware. It shares the sink's
   Postgres instance for demo convenience; in a real deployment this lives in the control silo.
 - The org mover code is split into 2 parts:
   - **Snapshot:** one-time, consistent read of the org's existing data — a single `REPEATABLE READ`
