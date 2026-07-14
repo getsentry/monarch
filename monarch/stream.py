@@ -1,17 +1,24 @@
 """Stream consumes each source database's replication slot for changes, applies in-scope ones
-to the sink and maintains membership sets so children and later changes see rows in scope.
+to the sink, and records the blob keys those changes reference.
 
 Each snapshot ran on its slot's exported snapshot, so snapshot and stream meet exactly at that
-database's consistent point. All slots are consumed in one process, multiplexed over select():
-scoping is cross-database (a file row on one database is admitted by project membership grown
-from another), so the streams share one Scope. Per stream, changes are buffered per source
-transaction and applied inside sink transactions at the Commit marker, so the sink only ever
-shows states the source actually had. Apply stays idempotent (upsert / delete-if-present) for
-crash re-delivery: feedback is sent only at applied commit boundaries, so a restart replays
-whole transactions since that stream's last flushed LSN. Apply is deliberately serial within
-a stream: upsert convergence depends on source commit order ("last write wins" is only correct
-when "last" is the source's last), so each slot is one ordered pipe -- the design is only
-parallel across databases not on a single stream.
+database's consistent point. All slots are consumed in one process, multiplexed over select().
+Scoping needs no cross-stream state: cross-store references are frozen for the move
+(config.validate; asserted fatally below), so root/frozen membership is a static input, and
+dynamic parents are same-store -- WAL order delivers a parent before its children on that
+parent's own stream, so each stream grows its own local sets. Per stream, changes are buffered
+per source transaction and applied inside sink transactions at the Commit marker, so the sink
+only ever shows states the source actually had. Apply stays idempotent (upsert /
+delete-if-present) for crash re-delivery: feedback is sent only at applied commit boundaries,
+so a restart replays whole transactions since that stream's last flushed LSN. Apply is
+deliberately serial within a stream: upsert convergence depends on source commit order ("last
+write wins" is only correct when "last" is the source's last), so each slot is one ordered
+pipe -- the design is only parallel across databases not on a single stream.
+
+Blob bytes never ride the stream: an admitted change's keys join the store's blob membership
+(membership.py) and an interleaved worker converges them into the sink bucket (blobs.py).
+Blob-before-row binds only at cut-over -- the staging sink serves no reads -- so the gate is
+"no uncopied keys", never per-change ordering.
 
 TailFilter is the perf seam: decode + scope decision + membership maintenance behind one
 filter_batch call, so a native implementation can replace it wholesale if the tail can't keep
@@ -27,12 +34,12 @@ from typing import NoReturn
 
 from psycopg import Connection, sql
 
+from .blobs import copy_pending
 from .config import Cell, Graph
 from .decode import Change, Commit, Decoder, Truncate
+from .membership import BlobMembership, Membership
 from .move import MoveUnit, Phase, UnitStatus
 from psycopg2.extras import LogicalReplicationConnection, ReplicationCursor
-
-Membership = dict[str, set[int]]
 
 
 @dataclass
@@ -42,20 +49,6 @@ class StreamSource:
     repl: LogicalReplicationConnection
     slot: str
     publications: str  # comma-separated, as pgoutput's publication_names option expects
-
-
-class Scope:
-    """Scope state shared by every stream: membership, plus changes parked on a parent another
-    database's stream hasn't delivered yet. Within one database WAL order guarantees a parent's
-    change precedes its child's; across databases there is no order, so a child rejected only
-    for membership is parked and released when its parent arrives. Two honest gaps at demo
-    scale: parked changes whose parent never arrives (out-of-scope rows) accumulate -- eviction
-    needs a cross-stream watermark -- and a crash loses the park (its LSN is already flushed);
-    production would hold back flush_lsn or persist it."""
-
-    def __init__(self, membership: Membership) -> None:
-        self.membership = membership
-        self.parked: dict[tuple[str, int], list[Change]] = {}  # (parent, id) -> waiting
 
 
 @dataclass
@@ -70,6 +63,7 @@ class _Stream:
 
 
 HEARTBEAT_EVERY = 2.0  # seconds; a throttle, not a schedule -- busy loops don't write more
+BLOB_BATCH = 8  # keys per loop pass: the worker rides the stream loop, so batches stay small
 
 
 def format_lsn(lsn: int) -> str:
@@ -84,6 +78,7 @@ def run_streams(
     graph: Graph,
     membership: Membership,
     copiers: dict[str, Callable[[str], bool]],
+    blob_members: dict[str, BlobMembership],
     units: dict[str, MoveUnit],  # store -> this mover's ledger row, for the heartbeat
 ) -> None:
     """Consume every source database's slot until interrupted -- the streams have no natural end
@@ -95,7 +90,6 @@ def run_streams(
     Buffering is per source transaction: a huge one (bulk update over in-scope rows) buffers in
     memory until its Commit -- fine at prototype scale; pgoutput proto v2 streams these."""
     sink_for = {t: sinks[db.dsn] for db in sink.databases for t in db.tables(graph)}
-    scope = Scope(membership)
     streams = []
     for s in sources:
         cur = s.repl.cursor()
@@ -104,14 +98,25 @@ def run_streams(
             decode=False,
             options={"proto_version": "1", "publication_names": s.publications},
         )
+        # each stream scopes independently: frozen sets are identical copies, dynamic
+        # parents only ever grow from this stream's own tables
         streams.append(
-            _Stream(s.store, cur, TailFilter(Decoder(s.conn), graph, scope), units[s.store])
+            _Stream(
+                s.store, cur,
+                TailFilter(Decoder(s.conn), graph, {t: set(ids) for t, ids in membership.items()}),
+                units[s.store],
+            )
         )
         # do-then-record: streaming only once this slot really has a consumer. False on a
         # restart (already streaming) -- journal the resume as its own fact, not a fake
         # duplicate transition
         if not units[s.store].transition(UnitStatus.STREAMING, note=f"consuming {s.slot}"):
             units[s.store].add_event(f"mover resumed: consuming {s.slot}")
+    for store, bm in blob_members.items():
+        copied, total = bm.counts()
+        pending_keys = total - copied
+        if not units[store].transition(UnitStatus.STREAMING, note=f"worker draining {pending_keys} pending key(s)"):
+            units[store].add_event("worker resumed")
     names = ", ".join(st.store for st in streams)
     print(f"\nstream: consuming slots on [{names}] for org changes (Ctrl-C to stop)\n")
     # read_message + select instead of consume_stream: consume_stream is one long-running C
@@ -129,13 +134,19 @@ def run_streams(
                     head=format_lsn(st.cursor.wal_end) if st.cursor.wal_end else None,
                     last_commit_at=st.last_commit_at,
                 )
+            for store, bm in blob_members.items():
+                copied, total = bm.counts()  # applied/head take each backend's own units: keys here
+                units[store].heartbeat(applied=str(copied), head=str(total))
             last_beat = now
         idle = True
         for st in streams:
             if (msg := st.cursor.read_message()) is None:
                 continue
             idle = False
-            apply_message(st, msg, sink_for, graph, copiers)
+            apply_message(st, msg, sink_for, graph, blob_members)
+        for store, bm in blob_members.items():
+            if copy_pending(bm, copiers[store], BLOB_BATCH):
+                idle = False
         if idle and not any(select.select([st.cursor for st in streams], [], [], 5.0)):
             for st in streams:
                 st.cursor.send_feedback()  # idle: heartbeat so each walsender keeps its connection
@@ -146,10 +157,12 @@ def apply_message(
     msg,
     sink_for: dict[str, Connection],
     graph: Graph,
-    copiers: dict[str, Callable[[str], bool]],
+    blob_members: dict[str, BlobMembership],
 ) -> None:
     for item in st.tail.filter_batch([msg.payload]):
         if isinstance(item, Change):
+            if item.table in graph.frozen and item.op != "UPDATE":
+                fail_on_frozen_change(st, item)  # scope is static only because of the freeze
             st.pending.append(item)
             continue
         if isinstance(item, Truncate):
@@ -161,12 +174,14 @@ def apply_message(
             for conn, changes in by_sink.items():
                 with conn.transaction():
                     for change in changes:
-                        # blob before row: a row must never land ahead of its bytes. DELETEs
-                        # carry only the key, so get() is None and the blob stays (blobs.py).
+                        # record, don't copy: the worker converges keys -> bucket. DELETEs
+                        # carry only the key column, so get() is None and nothing is recorded.
                         for column, store in graph.blobs.get(change.table, {}).items():
                             if (key := change.get(column)) is not None:
-                                copiers[store](key)
+                                blob_members[store].add(key)
                         apply_change(conn, change)
+            for bm in blob_members.values():
+                bm.flush()  # before the ack: an acked key must survive a restart
             st.pending.clear()
         st.cursor.send_feedback(flush_lsn=msg.data_start)
         st.applied_lsn = msg.data_start
@@ -188,16 +203,24 @@ def fail_on_truncate(st: _Stream, truncate: Truncate) -> NoReturn:
     raise RuntimeError(f"{note}; move #{st.unit.move.id} {outcome}")
 
 
-class TailFilter:
-    """Decode messages and decide scope, updating membership so children and later changes see
-    rows that entered scope. Upsert-or-delete downstream absorbs re-delivery: a gap change
-    arriving through both snapshot and stream lands on the conflict arm, and a re-delivered
-    delete is a no-op."""
+def fail_on_frozen_change(st: _Stream, change: Change) -> NoReturn:
+    note = f'{change.op} on frozen "{change.table}" (id={change.get_int("id")}) mid-move'
+    st.unit.add_event(f"fatal: {note}")
+    moved = st.unit.move.transition(Phase.FAILED, note=f"{st.store}: {note}")
+    outcome = "marked failed" if moved else "left in existing phase"
+    raise RuntimeError(f"{note}; move #{st.unit.move.id} {outcome}")
 
-    def __init__(self, decoder: Decoder, graph: Graph, scope: Scope) -> None:
+
+class TailFilter:
+    """Decode messages and decide scope. Root and frozen parents are static sets; dynamic
+    parents grow locally as their own changes pass through. Upsert-or-delete downstream
+    absorbs re-delivery: a gap change arriving through both snapshot and stream lands on
+    the conflict arm, and a re-delivered delete is a no-op."""
+
+    def __init__(self, decoder: Decoder, graph: Graph, membership: Membership) -> None:
         self.decoder = decoder
         self.graph = graph
-        self.scope = scope
+        self.membership = membership
 
     def filter_batch(self, msgs) -> list[Change | Commit | Truncate]:
         """In-scope changes plus Commit markers (passed through: transaction boundaries are the
@@ -210,17 +233,18 @@ class TailFilter:
                 case Truncate() as truncate:
                     out.append(truncate)
                 case Change() as change:
-                    out.extend(self._admit(change))
+                    if (admitted := self._admit(change)) is not None:
+                        out.append(admitted)
         return out
 
-    def _admit(self, change: Change) -> list[Change]:
-        """The admitted changes: [change] if in scope, plus any parked children its arrival
-        releases (recursively); [] otherwise. A change failing only on membership is parked,
-        not dropped -- its parent may be in flight on another database's stream (Scope)."""
-        membership = self.scope.membership
+    def _admit(self, change: Change) -> Change | None:
+        """The change if in scope, else None. A dynamic parent is same-store
+        (config.validate), so its own change passed through this stream first -- membership
+        is stream-local and a miss means out of scope, never in flight."""
+        membership = self.membership
         row_id = change.get_int("id")
         if row_id is None:  # no key -> can't identify the row
-            return []
+            return None
         if change.table == self.graph.root:
             in_scope = row_id in membership.get(self.graph.root, set())
         elif change.op == "DELETE":
@@ -235,25 +259,19 @@ class TailFilter:
         elif (edge := self.graph.scope_edge(change.table)) is not None:
             value = change.get_int(edge.column)
             if value is None:
-                return []
+                return None
             in_scope = value in membership.get(edge.parent, set())
-            if not in_scope:
-                self.scope.parked.setdefault((edge.parent, value), []).append(change)
-                return []
         else:
             in_scope = False
         if not in_scope:
-            return []
-        out = [change]
-        if change.table in self.graph.parents:
+            return None
+        if change.table in self.graph.parents and change.table not in self.graph.frozen:
             members = membership.setdefault(change.table, set())
             if change.op == "DELETE":
                 members.discard(row_id)
             else:
                 members.add(row_id)
-                for parked in self.scope.parked.pop((change.table, row_id), []):
-                    out.extend(self._admit(parked))
-        return out
+        return change
 
 
 def cast_to(type_name: str) -> sql.SQL:

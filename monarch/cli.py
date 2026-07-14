@@ -1,5 +1,4 @@
 import argparse
-import json
 import sys
 from collections.abc import Callable
 from contextlib import ExitStack, closing
@@ -11,8 +10,9 @@ from . import dashboard, move, slot
 from .blobs import Bucket, copy_blob
 from .config import BlobStore, Cell, Graph, load_config
 from .cell_eviction import run_evict
+from .membership import BlobMembership, load_scope, save_scope
 from .snapshot import Source, estimate_rows, run_snapshot
-from .stream import Membership, StreamSource, run_streams
+from .stream import StreamSource, run_streams
 
 CONFIG = "postgres_config.yaml"
 FLEET = "fleet.yaml"
@@ -26,28 +26,6 @@ def slot_name(org_id: int, store: str) -> str:
     # slots are database-scoped objects, but named per store -- the mover unit; colocated
     # stores hold separate slots (each decoding the shared WAL) on their shared database
     return f"monarch_org_{org_id}_{store}"
-
-
-def membership_path(org_id: int) -> str:
-    """The file carrying membership from `snapshot` to `stream`. It must reflect what the snapshot
-    saw (i.e. what the sink holds), so the stream can route deletes of rows that later vanished
-    from the source. Stands in for deriving membership from the sink itself."""
-    return f"membership_org_{org_id}.json"
-
-
-def save_membership(org_id: int, membership: Membership) -> None:
-    serializable = {table: sorted(ids) for table, ids in membership.items()}
-    with open(membership_path(org_id), "w") as f:
-        json.dump(serializable, f, indent=2)
-
-
-def load_membership(org_id: int) -> Membership:
-    try:
-        with open(membership_path(org_id)) as f:
-            raw = json.load(f)
-    except FileNotFoundError:
-        sys.exit(f"no {membership_path(org_id)} -- run `snapshot --org-id {org_id}` first")
-    return {table: set(ids) for table, ids in raw.items()}
 
 
 def blob_copiers(graph: Graph, source: Cell, sink: Cell) -> dict[str, Callable[[str], bool]]:
@@ -115,14 +93,16 @@ def cmd_create_publication(org_id: int, graph: Graph, source: Cell, ledger_dsn: 
                     move.MoveUnit(m, store).add_event(f"publications created: {names} on {db.dbname}")
 
 
-def cmd_register(org_id: int, source: Cell, sink: Cell, ledger_dsn: str) -> None:
+def cmd_register(org_id: int, graph: Graph, source: Cell, sink: Cell, ledger_dsn: str) -> None:
     # Registration is the pure ledger step: the move row (born active = the lease) plus a
-    # pending unit per store. Nothing touches a cell until snapshot claims the units.
+    # pending unit per store -- blob stores included: each is a mover unit with its own
+    # lifecycle and progress. Nothing touches a cell until snapshot claims the units.
     with closing(connect(ledger_dsn)) as book:
         try:
             m = move.create(
                 book, org_id, source.name, sink.name,
-                [store for db in source.databases for store in db.stores],
+                [store for db in source.databases for store in db.stores]
+                + [name for name, s in graph.stores.items() if isinstance(s, BlobStore)],
             )
         except psycopg.errors.UniqueViolation:
             sys.exit("a live move already exists (one move at a time) -- finish or abort it first")
@@ -139,12 +119,12 @@ def cmd_snapshot(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: 
             sys.exit(f"no registered move for org {org_id} -- run `register` first")
         source_name, sink_name = m.cells()
         source, sink = cells[source_name], cells[sink_name]
+        blob_names = [name for name, s in graph.stores.items() if isinstance(s, BlobStore)]
         # the rerun check exits BEFORE the except below, which would abort the live move;
         # the real claim stays the pending -> copying CAS at each slot's creation
-        for db in source.databases:
-            for store in db.stores:
-                if move.MoveUnit(m, store).status() is not move.UnitStatus.PENDING:
-                    sys.exit(f"move #{m.id} already snapshotted ({store} is not pending)")
+        for store in [s for db in source.databases for s in db.stores] + blob_names:
+            if move.MoveUnit(m, store).status() is not move.UnitStatus.PENDING:
+                sys.exit(f"move #{m.id} already snapshotted ({store} is not pending)")
         try:
             sinks = {db.dsn: stack.enter_context(connect(db.dsn)) for db in sink.databases}
             conns = {db.dsn: stack.enter_context(connect(db.dsn)) for db in source.databases}
@@ -178,16 +158,28 @@ def cmd_snapshot(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: 
                             estimate_rows(sconn, graph, graph.store_tables(store), org_id, frozen_ids)
                         )
                         sources.append(Source(store, sconn, snapshot))
+            blob_members = {name: BlobMembership(org_id, name, fresh=True) for name in blob_names}
+            for name in blob_names:
+                move.MoveUnit(m, name).transition(move.UnitStatus.COPYING, note="recording keys")
             print()
-            membership = run_snapshot(sources, sinks, sink, graph, org_id, blob_copiers(graph, source, sink))
-            save_membership(org_id, membership)
+            membership = run_snapshot(sources, sinks, sink, graph, org_id, blob_members)
+            for db in source.databases:
+                for store in db.stores:
+                    save_scope(org_id, store,
+                               {t: membership[t] for t in graph.store_tables(store) if t in membership})
             for db in source.databases:
                 for store in db.stores:
                     rows = sum(len(membership.get(t, ())) for t in graph.store_tables(store))
                     unit = move.MoveUnit(m, store)
                     unit.record_copy_total(rows)
                     unit.transition(move.UnitStatus.COPIED, note=f"{rows} rows")
-            print(f"\nmembership saved to {membership_path(org_id)}")
+            for name, bm in blob_members.items():
+                bm.flush()
+                _, total = bm.counts()
+                unit = move.MoveUnit(m, name)
+                unit.record_copy_total(total)
+                unit.transition(move.UnitStatus.COPIED, note=f"{total} key(s) recorded")
+            print(f"\nmembership saved per store (membership_org_{org_id}_<store>.json)")
         except BaseException as e:
             # release the claim create() took: a dead live row would block every future move
             m.transition(move.Phase.ABORTED, note=repr(e))
@@ -197,7 +189,6 @@ def cmd_snapshot(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: 
 def cmd_stream(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: str) -> None:
     # Resumes the slots the snapshot created -- the stream never creates or drops one, so it can
     # crash and restart freely; the slots survive for the next resume.
-    membership = load_membership(org_id)
     with ExitStack() as stack:
         book = stack.enter_context(connect(ledger_dsn))
         m = move.find_active(book, org_id)
@@ -205,7 +196,11 @@ def cmd_stream(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: st
             sys.exit(f"no live move for org {org_id} -- register and snapshot first")
         source_name, sink_name = m.cells()
         source, sink = cells[source_name], cells[sink_name]
-        units = {store: move.MoveUnit(m, store) for db in source.databases for store in db.stores}
+        pg_stores = [store for db in source.databases for store in db.stores]
+        blob_names = [name for name, s in graph.stores.items() if isinstance(s, BlobStore)]
+        membership = load_scope(org_id, pg_stores)
+        blob_members = {name: BlobMembership(org_id, name) for name in blob_names}
+        units = {store: move.MoveUnit(m, store) for store in pg_stores + blob_names}
         sinks = {db.dsn: stack.enter_context(connect(db.dsn)) for db in sink.databases}
         sources = []
         for db in source.databases:
@@ -218,7 +213,8 @@ def cmd_stream(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: st
                 sources.append(StreamSource(store, conn, repl, slot_name(org_id, store), pubs))
         try:
             run_streams(
-                sources, sinks, sink, graph, membership, blob_copiers(graph, source, sink), units
+                sources, sinks, sink, graph, membership,
+                blob_copiers(graph, source, sink), blob_members, units,
             )
         except KeyboardInterrupt:
             # a clean stop can announce itself (a crash can't -- staleness covers that);
@@ -285,7 +281,7 @@ def main() -> None:
         case "create-publication":
             cmd_create_publication(args.org_id, graph, cells[args.source], ledger_dsn)
         case "register":
-            cmd_register(args.org_id, cells[args.source], cells[args.sink], ledger_dsn)
+            cmd_register(args.org_id, graph, cells[args.source], cells[args.sink], ledger_dsn)
         case "snapshot":
             cmd_snapshot(args.org_id, graph, cells, ledger_dsn)
         case "stream":
