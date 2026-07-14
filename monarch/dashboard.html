@@ -220,11 +220,13 @@ const PILL = { active: "run", draining: "warn", cut_over: "warn",
 const fmt = n => Number(n).toLocaleString("en-US");
 const fmtBytes = n => n < 1024 ? `${n} B`
   : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
+const fmtDur = ms => { const s = ms / 1000;
+  return s < 90 ? `${Math.round(s)}s`
+    : s < 5400 ? `${Math.round(s / 60)}m` : `${(s / 3600).toFixed(1)}h`; };
 // pg_lsn "X/Y" -> bytes; Number stays exact far past any demo's WAL position
 const lsnBytes = t => parseInt(t.split("/")[0], 16) * 2 ** 32 + parseInt(t.split("/")[1], 16);
 const lagBytes = u => u.head && u.applied ? Math.max(0, lsnBytes(u.head) - lsnBytes(u.applied)) : null;
 const FRESH_MS = 15000;  // heartbeat age past which a mover reads as dead
-const LAG_GATE_BYTES = 1 << 24;  // 16 MB, one WAL segment -- the demo's "caught up" bar
 const fresh = u => u.heartbeat_at && Date.now() - new Date(u.heartbeat_at) < FRESH_MS;
 const post = async (path, payload) => {
   const res = await fetch(path, { method: "POST",
@@ -267,7 +269,7 @@ async function pollMoves() {
       { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
     $("mvrows").innerHTML = moves.map(m => {
       const dur = TERMINAL.has(m.phase)
-        ? `${Math.max(1, Math.round((new Date(m.updated_at) - new Date(m.created_at)) / 1000))}s`
+        ? fmtDur(Math.max(1000, new Date(m.updated_at) - new Date(m.created_at)))
         : "";
       return `<div class="mvrow" onclick="location.href='?move=${m.id}'">` +
         `<div class="l1"><span class="mid">#${m.id}</span>` +
@@ -297,10 +299,7 @@ function snapLine(u) {
   let s = u.copy_rows_total != null ? `✓ ${fmt(u.copy_rows_total)} rows` : "✓ copied";
   if (u.copy_rows_total != null && u.copy_rows_estimate != null)
     s += ` (est ~${fmt(u.copy_rows_estimate)})`;
-  if (t.copying && t.copied) {
-    const secs = (new Date(t.copied) - new Date(t.copying)) / 1000;
-    s += ` · ${secs < 10 ? secs.toFixed(1) : Math.round(secs)}s`;
-  }
+  if (t.copying && t.copied) s += ` · ${fmtDur(new Date(t.copied) - new Date(t.copying))}`;
   if (t.copied) s += ` · ${clock(t.copied)}`;
   return s;
 }
@@ -317,7 +316,7 @@ function streamLine(u) {
   if (lag == null) return "streaming — no positions yet";
   let s = `lag ${fmtBytes(lag)} · applied ${u.applied}`;
   if (u.last_commit_at)
-    s += ` · last commit ${Math.round((Date.now() - new Date(u.last_commit_at)) / 1000)}s ago`;
+    s += ` (committed ${fmtDur(Date.now() - new Date(u.last_commit_at))} ago)`;
   return s;
 }
 
@@ -502,27 +501,8 @@ const ACTIONS = [
       return true;
     },
     arm: m => moversAlive ? null : "no live movers" },
-  { label: "stop writes → draining", would: "stop org writes + phase CAS → draining (mock: write-stop not built — the journal would say so)",
-    arm: m => {
-      if (!m || m.phase !== "active") return "needs an active move";
-      if (!lastUnits.every(u => u.status === "streaming")) return "every store must be streaming";
-      if (!moversAlive) return "the mover must be alive (dead reporter = meaningless lag)";
-      const lagging = lastUnits.filter(u => (lagBytes(u) ?? Infinity) >= LAG_GATE_BYTES);
-      if (lagging.length) return `stream must catch up — lagging: ${lagging.map(u => u.unit).join(", ")}`;
-      return null;
-    } },
-  { label: "cut over", would: "verify + flip routing, phase → cut_over (source keeps the frozen copy)",
-    // drain-done is computed here, never stored: writes are stopped (phase says so), so
-    // applied catching head means every org write has landed on the sink
-    arm: m => !m || m.phase !== "draining" ? "needs a draining move"
-      : !moversAlive ? "the mover must be alive (dead reporter = stale positions)"
-      : lastUnits.every(u => (lagBytes(u) ?? Infinity) === 0) ? null
-      : "every store must be fully caught up (applied = head)" },
   { label: "finalize", would: "drop slots + publications, evict org from source, phase → finalized (true point of no return)",
     arm: m => !m || m.phase !== "cut_over" ? "needs a cut-over move" : null },
-  { label: "revert — emergency", danger: true,
-    would: "flip routing back, POST-FLIP SINK WRITES LOST, phase → reverting",
-    arm: m => !m || m.phase !== "cut_over" ? "only possible from cut_over, before finalize" : null },
   { label: "abort move", danger: true,
     run: async note => {
       const { ok, status, body } = await post("/abort", { move: +pinned });
@@ -601,12 +581,14 @@ function storeTip(s) {
     if (u.copy_rows_total != null) lines += ` · ${fmt(u.copy_rows_total)} rows copied` +
       (u.copy_rows_estimate != null ? ` (est ~${fmt(u.copy_rows_estimate)})` : "");
     else if (u.copy_rows_estimate != null) lines += ` · ~${fmt(u.copy_rows_estimate)} rows expected`;
-    if (u.heartbeat_at) {
-      const age = Math.round((Date.now() - new Date(u.heartbeat_at)) / 1000);
-      lines += `<br>mover: <b>${moversAlive ? "alive" : "not running"}</b> — last heartbeat ${age}s ago`;
-    } else if (u.status !== "pending") lines += `<br>mover: no heartbeat yet`;
+    if (u.heartbeat_at) lines += `<br>mover: <b>${moversAlive ? "alive" : "not running"}</b>` +
+      ` — last heartbeat ${fmtDur(Date.now() - new Date(u.heartbeat_at))} ago`;
+    else if (u.status !== "pending") lines += `<br>mover: no heartbeat yet`;
     if (u.status === "streaming" && lagBytes(u) != null)
-      lines += `<br>stream: lag <b>${fmtBytes(lagBytes(u))}</b> — applied ${u.applied} · head ${u.head}`;
+      lines += `<br>stream: lag <b>${fmtBytes(lagBytes(u))}</b> — applied ${u.applied}` +
+        (u.last_commit_at
+          ? ` (committed ${fmtDur(Date.now() - new Date(u.last_commit_at))} ago)` : "") +
+        ` · head ${u.head}`;
   }
   return lines + `<br>tables: ${s.tables.join(", ")}`;
 }
