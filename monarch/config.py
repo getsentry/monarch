@@ -178,6 +178,15 @@ class Cell:
         cell's databases, only postgres stores in placements, every blob store located."""
 
 
+def list_units(graph: Graph, source: Cell) -> list[str]:
+    """Every mover unit a move from `source` needs: its postgres stores plus all blob
+    stores. The one definition every registration path and snapshot's pending-check
+    share, so the two ends of the pipeline can't disagree."""
+    return [store for db in source.databases for store in db.stores] + [
+        name for name, s in graph.stores.items() if isinstance(s, BlobStore)
+    ]
+
+
 def load_cells(path: str) -> dict[str, Cell]:
     with open(path) as f:
         raw = yaml.safe_load(f)

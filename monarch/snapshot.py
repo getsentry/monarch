@@ -81,6 +81,26 @@ def scope_predicate(
     return edge.column, sql.SQL("{} IN ({})").format(sql.Identifier(edge.column), id_list)
 
 
+def derive_membership(
+    sinks: dict[str, Connection], sink: Cell, graph: Graph, root_id: int
+) -> Membership:
+    """The streams' initial membership, read back from the sink. The sink holds exactly
+    the applied-and-acked rows -- snapshot's copy plus streamed changes -- so first start
+    and restart are the same read, and a parent grown mid-stream survives a restart.
+    Same parents-first walk as the snapshot; parents only, since only they scope others."""
+    conn_for = {t: sinks[db.dsn] for db in sink.databases for t in db.tables(graph)}
+    keys: dict[str, list[int]] = {}
+    for table in graph.topological_sort():
+        if table not in graph.parents:
+            continue
+        if (scope := scope_predicate(graph, table, keys, root_id)) is None:
+            continue
+        _, pred = scope
+        select = sql.SQL("SELECT id FROM {} WHERE {}").format(sql.Identifier(table), pred)
+        keys[table] = [r[0] for r in conn_for[table].execute(select).fetchall()]
+    return {table: set(ids) for table, ids in keys.items()}
+
+
 def copy_table(source: Connection, sink: Connection, table: str, pred: sql.Composable) -> int:
     """Stream one table's scoped rows source -> sink: COPY TO STDOUT frames forwarded
     chunk-by-chunk into COPY FROM STDIN, so rows are never materialized here."""
@@ -137,10 +157,11 @@ def run_snapshot(
     writes are one transaction per sink database -- atomic per database, not across them
     (that would need 2PC).
 
-    Returns the in-scope keys per table -- the streams' initial membership. The caller persists
-    it: membership must reflect what the snapshot saw (i.e. what the sink holds), not the source's
-    later state -- re-deriving it at stream start would silently drop deletes of rows that
-    vanished in between."""
+    Returns the in-scope keys per table -- the copy totals' source. The streams never
+    consume it: they derive their initial membership from the sink (derive_membership),
+    which holds exactly these rows. Deriving from the *source* instead would silently
+    drop deletes of rows that vanished between snapshot and stream start; the sink keeps
+    such rows until their DELETEs stream through."""
     print(f"snapshot: scoping org {root_id}\n")
     source_for = {t: s.conn for s in sources for t in graph.store_tables(s.store)}
     sink_for = {t: sinks[db.dsn] for db in sink.databases for t in db.tables(graph)}

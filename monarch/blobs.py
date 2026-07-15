@@ -38,7 +38,6 @@ def copy_pending(members: BlobMembership, copier: Callable[[str], bool], limit: 
     for key in keys:
         copier(key)
         members.mark_copied(key)
-    members.flush()
     return len(keys)
 
 

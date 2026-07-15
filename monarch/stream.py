@@ -180,8 +180,6 @@ def apply_message(
                             if (key := change.get(column)) is not None:
                                 blob_members[store].add(key)
                         apply_change(conn, change)
-            for bm in blob_members.values():
-                bm.flush()  # before the ack: an acked key must survive a restart
             st.pending.clear()
         st.cursor.send_feedback(flush_lsn=msg.data_start)
         st.applied_lsn = msg.data_start

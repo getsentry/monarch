@@ -1,81 +1,62 @@
-"""Per-store membership files: membership_org_<id>_<store>.json, one per mover unit.
+"""Move membership: which rows and blob keys a move has claimed. The sink is the record;
+membership sets are views over it, persisted only where the backing store can't be queried.
 
-A postgres store's file holds its scope slice (table -> in-scope ids), written once by
-snapshot and read-only afterwards: it must reflect what the snapshot saw (i.e. what the
-sink holds) so the stream can route deletes of rows that later vanished from the source.
-Cross-store references are frozen for the move, so these sets never change while
-streaming; dynamic (same-store) parents grow per stream in memory, never here.
+Postgres membership (Membership: table -> in-scope ids) is never persisted. Snapshot
+computes it in-memory to scope its own walk; each stream derives its copy from the sink
+at startup (snapshot.derive_membership) and grows dynamic (same-store) parents in memory
+as changes flow. The sink absorbs every applied change before its ack, so a restart
+re-derives exactly the acked state -- first start and restart are the same read.
 
-A blob store's file holds key -> copied, the move's only mutable membership: snapshot
-and stream add keys (grow-only -- keys dedup cross-org, so a row DELETE never removes
-one), the copy worker marks them copied. Uncopied == 0 is the cut-over gate's predicate.
-JSON stands in for ledger tables keyed (move, store)."""
+Blob membership is the ledger's blob_key table, the one materialized view: a bucket
+can't be asked what it holds or joined against what the sink references, so the table
+caches both facts -- rows are "referenced by the sink" (snapshot and stream insert;
+grow-only, since keys dedup cross-org and a row DELETE never removes one) and copied_at
+is "present in the sink bucket" (the copy worker stamps it). Keyed by (move, store), so
+a new move starts empty. No NULL copied_at left is the cut-over gate's predicate. The
+book connection is autocommit: an add is durable before the stream acks the WAL position
+that carried it."""
 
-import json
-import sys
+from psycopg import Connection
 
 Membership = dict[str, set[int]]
 
 
-def membership_path(org_id: int, store: str) -> str:
-    return f"membership_org_{org_id}_{store}.json"
-
-
-def save_scope(org_id: int, store: str, scope: Membership) -> None:
-    with open(membership_path(org_id, store), "w") as f:
-        json.dump({table: sorted(ids) for table, ids in scope.items()}, f, indent=2)
-
-
-def load_scope(org_id: int, stores: list[str]) -> Membership:
-    """The merged scope across `stores` -- safe to merge because every set is frozen."""
-    merged: Membership = {}
-    for store in stores:
-        try:
-            with open(membership_path(org_id, store)) as f:
-                raw = json.load(f)
-        except FileNotFoundError:
-            sys.exit(f"no {membership_path(org_id, store)} -- run `snapshot` first")
-        for table, ids in raw.items():
-            merged[table] = set(ids)
-    return merged
-
-
 class BlobMembership:
-    """One blob store's key -> copied set: the copy worker's queue, the unit's progress
-    (counts), and the gate's predicate. Flush rewrites the whole file -- fine at demo
-    scale; called at commit boundaries and after worker batches, never per key."""
+    """One blob store's slice of blob_key: the copy worker's queue, the unit's
+    progress (counts), and the gate's predicate."""
 
-    def __init__(self, org_id: int, store: str, *, fresh: bool = False) -> None:
-        self.path = membership_path(org_id, store)
-        self.dirty = False
-        if fresh:  # snapshot births the file; a leftover from a prior move must not leak in
-            self.keys: dict[str, bool] = {}
-            return
-        try:
-            with open(self.path) as f:
-                self.keys = json.load(f)
-        except FileNotFoundError:
-            sys.exit(f"no {self.path} -- run `snapshot` first")
+    def __init__(self, book: Connection, move_id: int, store: str) -> None:
+        self.book = book
+        self.move_id = move_id
+        self.store = store
 
     def add(self, key: str) -> None:
-        if key not in self.keys:
-            self.keys[key] = False
-            self.dirty = True
+        self.book.execute(
+            "INSERT INTO blob_key (move_id, store, key) VALUES (%s, %s, %s)"
+            " ON CONFLICT DO NOTHING",
+            (self.move_id, self.store, key),
+        )
 
     def uncopied(self, limit: int) -> list[str]:
-        return [k for k, copied in self.keys.items() if not copied][:limit]
+        rows = self.book.execute(
+            "SELECT key FROM blob_key"
+            " WHERE move_id = %s AND store = %s AND copied_at IS NULL LIMIT %s",
+            (self.move_id, self.store, limit),
+        ).fetchall()
+        return [key for (key,) in rows]
 
     def mark_copied(self, key: str) -> None:
-        self.keys[key] = True
-        self.dirty = True
+        self.book.execute(
+            "UPDATE blob_key SET copied_at = now()"
+            " WHERE move_id = %s AND store = %s AND key = %s",
+            (self.move_id, self.store, key),
+        )
 
     def counts(self) -> tuple[int, int]:
         """(copied, total)."""
-        return sum(self.keys.values()), len(self.keys)
-
-    def flush(self) -> None:
-        if not self.dirty:
-            return
-        with open(self.path, "w") as f:
-            json.dump(self.keys, f, indent=2)
-        self.dirty = False
+        row = self.book.execute(
+            "SELECT count(copied_at), count(*) FROM blob_key"
+            " WHERE move_id = %s AND store = %s",
+            (self.move_id, self.store),
+        ).fetchone()
+        return row[0], row[1]

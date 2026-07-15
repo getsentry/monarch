@@ -287,6 +287,9 @@ async function pollMoves() {
 const unitTimes = {};
 // journal facts the conductor sequences on: which units have their publications
 const pubsCreated = new Set();
+// blob stores are units too but have no publications; pub gates only consider the rest
+const blobStores = new Set();
+const needsPubs = () => lastUnits.filter(u => !blobStores.has(u.unit));
 
 function snapLine(u) {
   const t = unitTimes[u.unit] ?? {};
@@ -312,6 +315,9 @@ function renderSnapshot(units) {
 function streamLine(u) {
   if (u.status === "stream_ended") return "pipe closed";
   if (u.status !== "streaming") return "not streaming yet";
+  // blob units heartbeat key counts, not LSNs
+  if (blobStores.has(u.unit))
+    return u.head ? `${fmt(+u.applied)}/${fmt(+u.head)} keys copied` : "worker running — no counts yet";
   const lag = lagBytes(u);
   if (lag == null) return "streaming — no positions yet";
   let s = `lag ${fmtBytes(lag)} · applied ${u.applied}`;
@@ -381,6 +387,7 @@ let topo = null;
 async function loadTopology() {
   // structure is config, fetched once; poll() overlays each store's unit status
   try { topo = await (await fetch("/graph")).json(); } catch { return; }
+  for (const s of topo.stores) if (s.kind === "blob") blobStores.add(s.name);
   $("spine").innerHTML = `<div class="spinecard">` +
     `<div class="spinelab">❄ spine · fixed for the move — every cross-store edge binds here</div>` +
     `<div class="minis">${topo.spine.map(s =>
@@ -467,7 +474,7 @@ const ACTIONS = [
     },
     arm: m => !m || m.phase !== "active" ? "needs an active move"
       : lastUnits.some(u => u.status !== "pending") ? "slots already exist — too late for new publications"
-      : lastUnits.length && lastUnits.every(u => pubsCreated.has(u.unit))
+      : needsPubs().length && needsPubs().every(u => pubsCreated.has(u.unit))
         ? "publications already created" : null },
   { label: "run snapshot",
     run: async note => {
@@ -480,7 +487,7 @@ const ACTIONS = [
       if (!m) return "register a move first";
       if (m.phase !== "active") return "needs an active move";
       if (lastUnits.some(u => u.status !== "pending")) return "snapshot already ran";
-      return lastUnits.every(u => pubsCreated.has(u.unit)) ? null : "create the publications first";
+      return needsPubs().every(u => pubsCreated.has(u.unit)) ? null : "create the publications first";
     } },
   { label: "start stream",
     run: async note => {

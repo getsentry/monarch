@@ -48,16 +48,16 @@ data:
 	$(SOURCE_PSQL) -d source -c "ANALYZE"
 	$(SOURCE_PSQL) -d source_files -c "ANALYZE"
 
-# Reset the demo to a blank slate: drop every database, both buckets, and the move's
-# membership files (rebuild with `make schema data`). Slots on the standby are dropped
-# first: a database can't be dropped while a logical slot targets it.
+# Reset the demo to a blank slate: drop every database and both buckets (rebuild with
+# `make schema data`). Slots on the standby are dropped first: a database can't be
+# dropped while a logical slot targets it.
 reset:
 	-$(COMPOSE) exec -T standby psql -U monarch -d postgres -c "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name LIKE 'monarch_%'"
 	$(SOURCE_PSQL) -d postgres -c "DROP DATABASE IF EXISTS source"
 	$(SOURCE_PSQL) -d postgres -c "DROP DATABASE IF EXISTS source_files"
 	$(PSQL) -d postgres -c "DROP DATABASE IF EXISTS sink"
 	$(PSQL) -d postgres -c "DROP DATABASE IF EXISTS monarch_ledger"
-	rm -rf mock_storages/buckets membership_org_*.json
+	rm -rf mock_storages/buckets
 
 psql-source:
 	$(COMPOSE) exec primary psql -U monarch -d source

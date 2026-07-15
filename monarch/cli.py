@@ -8,10 +8,10 @@ import psycopg
 
 from . import dashboard, move, slot
 from .blobs import Bucket, copy_blob
-from .config import BlobStore, Cell, Graph, load_config
+from .config import BlobStore, Cell, Graph, list_units, load_config
 from .cell_eviction import run_evict
-from .membership import BlobMembership, load_scope, save_scope
-from .snapshot import Source, estimate_rows, run_snapshot
+from .membership import BlobMembership
+from .snapshot import Source, derive_membership, estimate_rows, run_snapshot
 from .stream import StreamSource, run_streams
 
 CONFIG = "postgres_config.yaml"
@@ -99,11 +99,7 @@ def cmd_register(org_id: int, graph: Graph, source: Cell, sink: Cell, ledger_dsn
     # lifecycle and progress. Nothing touches a cell until snapshot claims the units.
     with closing(connect(ledger_dsn)) as book:
         try:
-            m = move.create(
-                book, org_id, source.name, sink.name,
-                [store for db in source.databases for store in db.stores]
-                + [name for name, s in graph.stores.items() if isinstance(s, BlobStore)],
-            )
+            m = move.create(book, org_id, source.name, sink.name, list_units(graph, source))
         except psycopg.errors.UniqueViolation:
             sys.exit("a live move already exists (one move at a time) -- finish or abort it first")
         print(f"move #{m.id} registered: org {org_id}, {source.name} -> {sink.name}")
@@ -122,7 +118,7 @@ def cmd_snapshot(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: 
         blob_names = [name for name, s in graph.stores.items() if isinstance(s, BlobStore)]
         # the rerun check exits BEFORE the except below, which would abort the live move;
         # the real claim stays the pending -> copying CAS at each slot's creation
-        for store in [s for db in source.databases for s in db.stores] + blob_names:
+        for store in list_units(graph, source):
             if move.MoveUnit(m, store).status() is not move.UnitStatus.PENDING:
                 sys.exit(f"move #{m.id} already snapshotted ({store} is not pending)")
         try:
@@ -158,15 +154,11 @@ def cmd_snapshot(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: 
                             estimate_rows(sconn, graph, graph.store_tables(store), org_id, frozen_ids)
                         )
                         sources.append(Source(store, sconn, snapshot))
-            blob_members = {name: BlobMembership(org_id, name, fresh=True) for name in blob_names}
+            blob_members = {name: BlobMembership(book, m.id, name) for name in blob_names}
             for name in blob_names:
                 move.MoveUnit(m, name).transition(move.UnitStatus.COPYING, note="recording keys")
             print()
             membership = run_snapshot(sources, sinks, sink, graph, org_id, blob_members)
-            for db in source.databases:
-                for store in db.stores:
-                    save_scope(org_id, store,
-                               {t: membership[t] for t in graph.store_tables(store) if t in membership})
             for db in source.databases:
                 for store in db.stores:
                     rows = sum(len(membership.get(t, ())) for t in graph.store_tables(store))
@@ -174,12 +166,11 @@ def cmd_snapshot(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: 
                     unit.record_copy_total(rows)
                     unit.transition(move.UnitStatus.COPIED, note=f"{rows} rows")
             for name, bm in blob_members.items():
-                bm.flush()
                 _, total = bm.counts()
                 unit = move.MoveUnit(m, name)
                 unit.record_copy_total(total)
                 unit.transition(move.UnitStatus.COPIED, note=f"{total} key(s) recorded")
-            print(f"\nmembership saved per store (membership_org_{org_id}_<store>.json)")
+            print("\nblob keys recorded in the ledger; streams derive membership from the sink")
         except BaseException as e:
             # release the claim create() took: a dead live row would block every future move
             m.transition(move.Phase.ABORTED, note=repr(e))
@@ -198,10 +189,14 @@ def cmd_stream(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: st
         source, sink = cells[source_name], cells[sink_name]
         pg_stores = [store for db in source.databases for store in db.stores]
         blob_names = [name for name, s in graph.stores.items() if isinstance(s, BlobStore)]
-        membership = load_scope(org_id, pg_stores)
-        blob_members = {name: BlobMembership(org_id, name) for name in blob_names}
+        blob_members = {name: BlobMembership(book, m.id, name) for name in blob_names}
         units = {store: move.MoveUnit(m, store) for store in pg_stores + blob_names}
         sinks = {db.dsn: stack.enter_context(connect(db.dsn)) for db in sink.databases}
+        membership = derive_membership(sinks, sink, graph, org_id)
+        if not membership.get(graph.root):
+            sys.exit(f"org {org_id} not in sink {sink_name} -- run `snapshot` first")
+        counts = ", ".join(f"{t} {len(ids)}" for t, ids in membership.items())
+        print(f"membership derived from sink: {counts}")
         sources = []
         for db in source.databases:
             for store in db.stores:

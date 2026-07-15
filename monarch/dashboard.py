@@ -24,7 +24,7 @@ from psycopg import Connection, errors
 from psycopg.rows import dict_row
 
 from . import move
-from .config import BlobStore, Cell, Graph
+from .config import BlobStore, Cell, Graph, list_units
 
 _stream_proc: subprocess.Popen | None = None  # the last stream child; dies with us (one
 # process group), so a stale handle can't outlive a restart
@@ -199,8 +199,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             m = move.create(
-                self.conn, org, source.name, sink.name,
-                [store for db in source.databases for store in db.stores],
+                self.conn, org, source.name, sink.name, list_units(self.graph, source),
             )
         except errors.UniqueViolation:
             self._respond(409, "application/json",

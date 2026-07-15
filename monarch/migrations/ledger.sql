@@ -44,8 +44,6 @@ CREATE TABLE IF NOT EXISTS move_unit (
     PRIMARY KEY (move_id, unit)
 );
 
-ALTER TABLE move_unit DROP COLUMN IF EXISTS fence;
-ALTER TABLE move_unit DROP COLUMN IF EXISTS fence_passed_at;
 
 -- append-only journal for the dashboard feed and post-mortems: transitions,
 -- per-table counts, etc
@@ -56,4 +54,15 @@ CREATE TABLE IF NOT EXISTS move_event (
     unit    text,  -- null = org-level (phase transitions, verify results)
     message text        NOT NULL,
     FOREIGN KEY (move_id, unit) REFERENCES move_unit (move_id, unit)
+);
+
+-- one row per blob key a move must copy: the copy worker's queue, the blob unit's
+-- progress, and the cut-over gate's predicate (no NULL copied_at left). Insert-only
+-- while a move lives -- keys dedup cross-org, so a row DELETE never removes one
+CREATE TABLE IF NOT EXISTS blob_key (
+    move_id   bigint NOT NULL REFERENCES move(id),
+    store     text   NOT NULL,
+    key       text   NOT NULL,
+    copied_at timestamptz,  -- write-once; null = recorded, bytes not yet proven in the sink
+    PRIMARY KEY (move_id, store, key)
 );

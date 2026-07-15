@@ -4,5 +4,4 @@ mock_storages/buckets/
 __pycache__/
 .DS_Store
 .mypy_cache
-membership_org_*.json
 *.egg-info/
