@@ -54,6 +54,11 @@ class Change:
 
 
 @dataclass
+class Begin:
+    """Start of a source transaction: until its Commit, there is no safe flush point."""
+
+
+@dataclass
 class Commit:
     """End of a source transaction: the changes since the last Commit apply atomically."""
 
@@ -86,9 +91,9 @@ class Decoder:
         self.types: dict[int, str] = dict(rows)
         self.relations: dict[int, _Relation] = {}
 
-    def decode(self, data: bytes) -> Change | Commit | Truncate | None:
-        """One message -> a row change or a Commit marker; None for the rest
-        (begin/relation/origin/type)."""
+    def decode(self, data: bytes) -> Begin | Change | Commit | Truncate | None:
+        """One message -> a row change or a transaction marker; None for the rest
+        (relation/origin/type)."""
         b = _Buf(data)
         kind = b.u8()
         if kind == ord("R"):
@@ -143,7 +148,9 @@ class Decoder:
             b.u64()  # commit lsn
             b.u64()  # end lsn
             return Commit(_PG_EPOCH + timedelta(microseconds=b.u64()))
-        if kind in b"BOM":  # begin/origin/message
+        if kind == ord("B"):
+            return Begin()
+        if kind in b"OM":  # origin/message
             return None
         raise ValueError(f"unknown pgoutput message kind {chr(kind)!r}")
 

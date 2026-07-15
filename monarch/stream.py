@@ -36,7 +36,7 @@ from psycopg import Connection, sql
 
 from .blobs import copy_pending
 from .config import Cell, Graph
-from .decode import Change, Commit, Decoder, Truncate
+from .decode import Begin, Change, Commit, Decoder, Truncate
 from .membership import BlobMembership, Membership
 from .move import MoveUnit, Phase, UnitStatus
 from psycopg2.extras import LogicalReplicationConnection, ReplicationCursor
@@ -58,8 +58,9 @@ class _Stream:
     tail: "TailFilter"
     unit: MoveUnit
     pending: list[Change] = field(default_factory=list)
-    applied_lsn: int = 0  # last flushed commit; 0 until the first commit is applied
+    applied_lsn: int = 0  # last flushed position; 0 until the first commit or skip-flush
     last_commit_at: datetime | None = None
+    in_txn: bool = False  # between a Begin and its Commit: no safe flush point
 
 
 HEARTBEAT_EVERY = 2.0  # seconds; a throttle, not a schedule -- busy loops don't write more
@@ -84,9 +85,11 @@ def run_streams(
     """Consume every source database's slot until interrupted -- the streams have no natural end
     before cutover. Apply, then ack, per stream: feedback flushes a commit's LSN only after its
     transaction hit the sink, so a crash re-delivers whole unacked transactions -- duplicates,
-    absorbed by idempotent apply, not loss. Feedback goes on every commit, in-scope or not, so
-    each slot advances (and its source reclaims WAL) even when the org is idle while the cell
-    is busy.
+    absorbed by idempotent apply, not loss. Feedback goes on every delivered commit, in-scope
+    or not; transactions empty for a slot's publications are never delivered at all (pgoutput
+    skips them), so the heartbeat also confirms the walsender's reported end between
+    transactions (flush_skipped) -- each slot advances (and its source reclaims WAL) even when
+    the org is idle while the cell is busy.
     Buffering is per source transaction: a huge one (bulk update over in-scope rows) buffers in
     memory until its Commit -- fine at prototype scale; pgoutput proto v2 streams these."""
     sink_for = {t: sinks[db.dsn] for db in sink.databases for t in db.tables(graph)}
@@ -129,6 +132,7 @@ def run_streams(
         # gates watch their own child process directly)
         if (now := time.monotonic()) - last_beat >= HEARTBEAT_EVERY:
             for st in streams:
+                flush_skipped(st)
                 units[st.store].heartbeat(
                     applied=format_lsn(st.applied_lsn) if st.applied_lsn else None,
                     head=format_lsn(st.cursor.wal_end) if st.cursor.wal_end else None,
@@ -160,6 +164,9 @@ def apply_message(
     blob_members: dict[str, BlobMembership],
 ) -> None:
     for item in st.tail.filter_batch([msg.payload]):
+        if isinstance(item, Begin):
+            st.in_txn = True
+            continue
         if isinstance(item, Change):
             if item.table in graph.frozen and item.op != "UPDATE":
                 fail_on_frozen_change(st, item)  # scope is static only because of the freeze
@@ -184,6 +191,19 @@ def apply_message(
         st.cursor.send_feedback(flush_lsn=msg.data_start)
         st.applied_lsn = msg.data_start
         st.last_commit_at = item.ts
+        st.in_txn = False
+
+
+def flush_skipped(st: _Stream) -> None:
+    """Transactions with nothing for this slot's publications are never delivered (pgoutput
+    skips them), so no Commit arrives to ack them -- a quiet store colocated with a busy one
+    would pin WAL and read as ever more behind. Between transactions, everything up to the
+    walsender's reported end is skips: confirm it. Mid-transaction, wal_end can lie past
+    changes not yet applied, so Begin..Commit windows never flush here."""
+    if st.in_txn or not st.cursor.wal_end or st.cursor.wal_end <= st.applied_lsn:
+        return
+    st.cursor.send_feedback(flush_lsn=st.cursor.wal_end)
+    st.applied_lsn = st.cursor.wal_end
 
 
 def fail_on_truncate(st: _Stream, truncate: Truncate) -> NoReturn:
@@ -220,12 +240,14 @@ class TailFilter:
         self.graph = graph
         self.membership = membership
 
-    def filter_batch(self, msgs) -> list[Change | Commit | Truncate]:
-        """In-scope changes plus Commit markers (passed through: transaction boundaries are the
-        apply/ack unit downstream)."""
-        out: list[Change | Commit | Truncate] = []
+    def filter_batch(self, msgs) -> list[Begin | Change | Commit | Truncate]:
+        """In-scope changes plus Begin/Commit markers (passed through: transaction boundaries
+        are the apply/ack unit downstream)."""
+        out: list[Begin | Change | Commit | Truncate] = []
         for msg in msgs:
             match self.decoder.decode(msg):
+                case Begin() as begin:
+                    out.append(begin)
                 case Commit() as commit:
                     out.append(commit)
                 case Truncate() as truncate:
