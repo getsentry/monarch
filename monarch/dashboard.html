@@ -335,13 +335,13 @@ function streamRow(u) {
     const pending = +u.head - +u.applied;
     return pending
       ? { text: `${fmt(+u.applied)}/${fmt(+u.head)} keys copied`, frac: pending / KEYS_FULL, cls: "" }
-      : { text: `${fmt(+u.head)}/${fmt(+u.head)} keys · caught up ✓`, frac: 0, cls: "hit" };
+      : { text: `${fmt(+u.head)}/${fmt(+u.head)} keys ✓`, frac: 0, cls: "hit" };
   }
   const lag = lagBytes(u);
   if (lag == null) return { text: "streaming — no positions yet", frac: 0, cls: "" };
   return lag
     ? { text: `${fmtBytes(lag)} behind`, frac: lag / LAG_FULL, cls: "" }
-    : { text: "caught up ✓", frac: 0, cls: "hit" };
+    : { text: "0 B behind ✓", frac: 0, cls: "hit" };
 }
 
 function renderStream(units) {
@@ -410,9 +410,9 @@ async function loadTopology() {
   try { topo = await (await fetch("/graph")).json(); } catch { return; }
   for (const s of topo.stores) if (s.kind === "blob") blobStores.add(s.name);
   $("spine").innerHTML = `<div class="spinecard">` +
-    `<div class="spinelab">❄ spine · fixed for the move — every cross-store edge binds here</div>` +
+    `<div class="spinelab">spine · fixed for the move — every cross-store edge binds here</div>` +
     `<div class="minis">${topo.spine.map(s =>
-      `<div class="mini" id="spine-${s.table}">${s.frozen ? "❄ " : ""}${s.table}</div>`).join("")}</div></div>`;
+      `<div class="mini" id="spine-${s.table}">${s.frozen ? "📌 " : ""}${s.table}</div>`).join("")}</div></div>`;
   const node = s => `
     <div class="snode ${s.kind === "blob" ? "bucket" : ""}" id="node-${s.name}">
       <div class="nm"><b>${s.name}</b>
@@ -625,8 +625,9 @@ function spineTip(name) {
   const s = topo.spine.find(x => x.table === name);
   if (!s) return "";
   return s.frozen
-    ? `<b>❄ ${name}</b> — frozen for the move: no creates or deletes, so every ` +
-      `cross-database edge resolves against a fixed id set (race-free)`
+    ? `<b>📌 ${name}</b> — static for the move: its id set is assumed not to change ` +
+      `(a create or delete fails the move), so every cross-database edge resolves ` +
+      `against a fixed id set (race-free)`
     : `<b>${name}</b> — the root: the move is every row reachable from one ${name}`;
 }
 

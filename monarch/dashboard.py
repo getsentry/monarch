@@ -59,7 +59,7 @@ def describe_topology(graph: Graph, cells: dict[str, Cell]) -> dict:
                 e = graph.scope_edge(t)
                 if e and graph.store_of.get(e.parent) != name:
                     cross.setdefault(e.parent, set()).add(e.column)
-            # cross-db scope edges are the loaded ones (the race surface the frozen spine
+            # cross-db scope edges are the loaded ones (the race surface the static spine
             # exists for); the spine's home store still hangs off the root, but over the
             # same WAL -- drawn quiet, never aqua
             binds = [

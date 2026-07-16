@@ -18,16 +18,17 @@ stores:
   # is responsible for GC on the filestore.
   filestore:   { type: blob_store, eviction: keep }
 
-# `project` is marked as frozen. This means no project creation or deletion for the org
-# being moved. This is because `project` is the reference used across multiple storage systems
-# - making it frozen makes the cross-store edge free of race conditions.
+# `project` is marked as static: its id set is assumed not to change during a move.
+# Nothing is enforced on the customer -- a project creation or deletion mid-move fails
+# the move instead. This is because `project` is the reference used across multiple
+# storage systems - a static id set makes the cross-store edge free of race conditions.
 relationships:
   organization:
     store: default
 
   project:
     store: default
-    frozen: true
+    static: true
     refs:
       organization_id: { parent: organization }
 

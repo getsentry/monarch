@@ -43,7 +43,7 @@ class Graph:
     store_of: dict[str, str]  # table -> logical store name
     edges: dict[str, list[Edge]]  # table -> parent edges
     blobs: dict[str, dict[str, str]]  # table -> blob column -> blob store name
-    frozen: frozenset[str]  # tables whose structural writes pause during a move
+    frozen: frozenset[str]  # tables whose id sets are assumed static during a move (manifest: `static`)
 
     @cached_property
     def parents(self) -> set[str]:
@@ -127,7 +127,7 @@ def load_graph(path: str) -> Graph:
     frozen: set[str] = set()
     for table, spec in raw["relationships"].items():
         store_of[table] = spec["store"]
-        if spec.get("frozen"):
+        if spec.get("static"):
             frozen.add(table)
         for column, ref in spec.get("refs", {}).items():
             if "parent" in ref:

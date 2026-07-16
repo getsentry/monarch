@@ -243,7 +243,7 @@ const COUNT = {
   errors: 90, eap: 90,  // clickhouse progress is measured in days of partitions, not rows
   filestore: 542000, attachment_blobs: 484000,
 };
-const SPINE = ["organization", "project"];      // root + frozen: every cross-store edge binds here
+const SPINE = ["organization", "project"];      // root + static tables: every cross-store edge binds here
 const FROZEN = new Set(["project"]);
 const STORES = [
   // every store is its own pipeline in this example: own database/consumer, slot, stream
@@ -281,9 +281,9 @@ const storeCard = s => {
 graphEl.insertAdjacentHTML("beforeend", `
   <div class="grow">
     <div class="spinecard" id="spine" data-node="spine">
-      <div class="spinelab">❄ spine · fixed for the move — every cross-store edge binds here</div>
+      <div class="spinelab">spine · fixed for the move — every cross-store edge binds here</div>
       <div class="minis">${SPINE.map(n =>
-        `<div class="mini" id="m-${n}"><b>${FROZEN.has(n) ? "❄ " : ""}${n}</b>` +
+        `<div class="mini" id="m-${n}"><b>${FROZEN.has(n) ? "📌 " : ""}${n}</b>` +
         `<span class="mv" id="tv-${n}">0 / ${COUNT[n]}</span>` +
         `<span class="ck wait" id="tk-${n}">…</span></div>`).join("")}
       </div>
@@ -426,21 +426,21 @@ const tableList = name => {
     `${t} ${fmtC(Math.min(sink[t], sourceN[t]))}/${fmtC(sourceN[t])}`).join(" · ");
 };
 const TIPS = {
-  spine: () => `<b>the spine</b><div class="l">the root plus ❄ frozen tables — their id sets
-    cannot change during the move, so every cross-store edge resolves against a
-    <span>fixed target</span>. This is what lets independent streams compose into one
-    consistent move.</div>`,
+  spine: () => `<b>the spine</b><div class="l">the root plus 📌 static tables — their id sets
+    are assumed not to change during the move (a violating write aborts it), so every
+    cross-store edge resolves against a <span>fixed target</span>. This is what lets
+    independent streams compose into one consistent move.</div>`,
   "s-default": () => `<b>default</b><div class="l">postgres · its own WAL, slot and stream</div>
     <div class="l">holds the spine; its child tables scope internally — parent → child order
     is <span>guaranteed by the WAL</span>, nothing to coordinate</div>
     <div class="l">${tableList("default")}</div>`,
   "s-attachments": () => `<b>attachments</b><div class="l">postgres · its own WAL, slot and stream</div>
     <div class="l">scoped by <span>project_id</span> → spine, <span>across databases</span>:
-    no shared WAL, no shared transaction — sound only because ❄ project is frozen</div>
+    no shared WAL, no shared transaction — sound only because 📌 project's id set stays static</div>
     <div class="l">${tableList("attachments")}</div>`,
   "s-files": () => `<b>files</b><div class="l">postgres · its own WAL, slot and stream</div>
     <div class="l">scoped by <span>project_id</span> → spine, <span>across databases</span>:
-    no shared WAL, no shared transaction — sound only because ❄ project is frozen</div>
+    no shared WAL, no shared transaction — sound only because 📌 project's id set stays static</div>
     <div class="l">${tableList("files")}</div>`,
   "s-errors": () => `<b>errors</b><div class="l">clickhouse · column store, partitioned by date</div>
     <div class="l">scoped by <span>project_id</span> → spine; copied <span>by date partition</span>
@@ -682,7 +682,7 @@ async function play() {
     feed("snap", `${t} — ${fmtC(sourceN[t])} row(s) → sink`);
   }
   spineCard.classList.remove("copying");
-  feed("note", "spine ids are fixed by the freeze — every store's walk is now independent");
+  feed("note", "spine ids are treated as static — every store's walk is now independent");
   feed("note", "totals are discovered as each walk descends: a child can't be counted until its parents' ids are known");
   // one runner per store; only ordering left is parents-first inside each store
   // streams go live per database the moment its snapshot finishes -- no global barrier;
@@ -930,7 +930,7 @@ async function play() {
   feed("setup", "operator: evict source copy");
   feed("setup", "precondition verified: no slot for the org survives anywhere — a live slot would stream the coming deletes to the sink (the cli guard)");
   await wait(1600); if (!alive()) return;
-  feed("setup", "membership + progress records archived; edge freeze levers released");
+  feed("setup", "membership + progress records archived; project creates/deletes are safe again");
   await wait(1200); if (!alive()) return;
   setPhase("evict", "deleting evil-corp from the source — a bounded job, children first within each store");
   const EVICT_NOTES = {
