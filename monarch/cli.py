@@ -117,7 +117,7 @@ def cmd_snapshot(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: 
         source, sink = cells[source_name], cells[sink_name]
         blob_names = [name for name, s in graph.stores.items() if isinstance(s, BlobStore)]
         # the rerun check exits BEFORE the except below, which would abort the live move;
-        # the real claim stays the pending -> copying CAS at each slot's creation
+        # the real claim stays the pending -> copying compare-and-swap at each slot's creation
         for store in list_units(graph, source):
             if move.MoveUnit(m, store).status() is not move.UnitStatus.PENDING:
                 sys.exit(f"move #{m.id} already snapshotted ({store} is not pending)")
@@ -219,21 +219,27 @@ def cmd_stream(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: st
             raise
 
 
-def cmd_evict(org_id: int, graph: Graph, cell: Cell) -> None:
+def cmd_evict(org_id: int, graph: Graph, cell: Cell, ledger_dsn: str, move_id: int) -> None:
     # Refuse while any of the org's slots survive on the cell: a live stream would replicate
-    # the eviction to the sink as ordinary deletes (evict.py). Checked per database.
-    with ExitStack() as stack:
-        conns = {db.dsn: stack.enter_context(connect(db.dsn)) for db in cell.databases}
-        for db in cell.databases:
+    # the eviction to the sink as ordinary deletes (evict.py). Checked per database on the
+    # decode endpoint -- slots live where decoding happens.
+    for db in cell.databases:
+        with connect(db.dsn) as decode:
             for store in db.stores:
-                live = conns[db.dsn].execute(
+                live = decode.execute(
                     "SELECT 1 FROM pg_replication_slots WHERE slot_name = %s",
                     (slot_name(org_id, store),),
                 ).fetchone()
                 if live:
                     sys.exit(f"slot {slot_name(org_id, store)} still exists -- run drop-slot first")
+    # the deletes are writes: they run on the primary (dsn is a read-only standby when split)
+    with ExitStack() as stack:
+        conns = {db.dsn: stack.enter_context(connect(db.primary_dsn or db.dsn)) for db in cell.databases}
         buckets = {name: Bucket(loc["file_path"]) for name, loc in cell.blobs.items()}
         run_evict(conns, cell, graph, org_id, buckets)
+    # the completion is journaled against the move -- the fact the dashboard's gate watches
+    with connect(ledger_dsn) as book:
+        move.Move(book, move_id).add_event(f"org evicted from {cell.name}")
 
 
 def main() -> None:
@@ -267,6 +273,8 @@ def main() -> None:
     )
     p.add_argument("--org-id", type=int, required=True)
     p.add_argument("--cell", default="source", help="cell to evict the org from (fleet.yaml)")
+    p.add_argument("--move-id", type=int, required=True,
+                   help="move to journal the eviction against")
     p = sub.add_parser("dashboard", help="Serve the demo dashboard (reads only the ledger)")
     p.add_argument("--port", type=int, default=8008)
     args = parser.parse_args()
@@ -298,7 +306,7 @@ def main() -> None:
                             slot.drop_publication(admin, name)
                             print(f"publication {name} dropped on {db.dbname}")
         case "evict":
-            cmd_evict(args.org_id, graph, cells[args.cell])
+            cmd_evict(args.org_id, graph, cells[args.cell], ledger_dsn, args.move_id)
         case "dashboard":
             with connect(ledger_dsn) as conn:
                 try:

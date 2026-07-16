@@ -7,7 +7,8 @@ finished move; GET /state?move=N pins a specific move -- an old one renders its 
 story exactly as it happened, the journal being append-only. Events return with
 id > `since`, so the page accumulates the feed incrementally. GET / serves the page.
 POST /register and /abort are the ledger writes: register books a move (a pure insert),
-abort is the phase CAS that kills one -- the never-touches-a-cell rule survives both."""
+abort is the phase compare-and-swap that kills one -- the never-touches-a-cell rule
+survives both."""
 
 import json
 import signal
@@ -187,6 +188,10 @@ class Handler(BaseHTTPRequestHandler):
             self._stop_stream()
         elif path == "/cutover":
             self._cutover(body)
+        elif path == "/finalize":
+            self._finalize(body)
+        elif path == "/evict":
+            self._evict(body)
         elif path == "/abort":
             self._abort(body)
         else:
@@ -225,12 +230,26 @@ class Handler(BaseHTTPRequestHandler):
         self._respond(200, "application/json", _to_json({"stopped": _stream_proc.pid}))
 
     def _cutover(self, body) -> None:
-        """Demo drain + cut-over: two phase CASes and their journal lines, nothing else --
-        no gate checks, no routing flip. The ledger story without the machinery, for now."""
+        """Demo drain + cut-over: movers must have streamed and be stopped, then two phase
+        compare-and-swaps and their journal lines -- no drain gates or routing flip yet.
+        The flip happens with nothing moving, so the sink is already at its final
+        pre-flip state."""
         try:
             move_id = int(body["move"])
         except (KeyError, TypeError, ValueError):
             self._respond(400, "application/json", _to_json({"error": "expected {move}"}))
+            return
+        if _stream_proc is not None and _stream_proc.poll() is None:
+            self._respond(409, "application/json",
+                          _to_json({"error": "stop the stream first — the flip requires stopped movers"}))
+            return
+        never_streamed = self.conn.execute(
+            "SELECT count(*) FROM move_unit WHERE move_id = %s AND status != 'streaming'",
+            (move_id,),
+        ).fetchone()[0]
+        if never_streamed:
+            self._respond(409, "application/json",
+                          _to_json({"error": "the stream never ran — every store must reach streaming before the flip"}))
             return
         m = move.Move(self.conn, move_id)
         if not m.transition(move.Phase.DRAINING, note="demo: org writes assumed stopped"):
@@ -239,6 +258,65 @@ class Handler(BaseHTTPRequestHandler):
             return
         m.transition(move.Phase.CUT_OVER, note="demo: routing flip is a no-op here")
         self._respond(200, "application/json", _to_json({"phase": "cut_over"}))
+
+    def _finalize(self, body) -> None:
+        """Finalize = teardown then the terminal compare-and-swap, do-then-record: drop the
+        slots, drop the publications, and only then phase -> finalized. Evicting the org's
+        source copy is post-terminal cleanup via the CLI, like abort's sink scrub -- it is
+        row-bound and can take a while, and the move's outcome doesn't depend on it. The
+        steps run synchronously -- seconds at demo scale; polls queue behind, as with
+        stop-stream. A step failure leaves the phase at cut_over for a re-run."""
+        try:
+            move_id = int(body["move"])
+        except (KeyError, TypeError, ValueError):
+            self._respond(400, "application/json", _to_json({"error": "expected {move}"}))
+            return
+        row = self.conn.execute(
+            "SELECT root_id, source_cell, phase FROM move WHERE id = %s", (move_id,)
+        ).fetchone()
+        if row is None or row[2] != "cut_over":
+            self._respond(409, "application/json", _to_json({"error": "needs a cut-over move"}))
+            return
+        org, source = row[0], row[1]
+        for command, extra in [
+            ("drop-slot", ["--from", source]),
+            ("drop-publication", ["--from", source]),
+        ]:
+            args = [sys.executable, "-m", "monarch.cli", command, "--org-id", str(org), *extra]
+            print(f"{datetime.now():%H:%M:%S} running `monarch {' '.join(args[3:])}`")
+            if subprocess.run(args).returncode != 0:
+                self._respond(500, "application/json",
+                              _to_json({"error": f"{command} failed — see the dashboard terminal;"
+                                        " phase stays cut_over, fix and finalize again"}))
+                return
+        m = move.Move(self.conn, move_id)
+        units = self.conn.execute(
+            "SELECT unit FROM move_unit WHERE move_id = %s", (move_id,)
+        ).fetchall()
+        for (unit,) in units:
+            move.MoveUnit(m, unit).transition(move.UnitStatus.STREAM_ENDED, note="teardown")
+        m.transition(move.Phase.FINALIZED, note="slots + publications dropped; source copy awaits eviction (CLI)")
+        self._respond(200, "application/json", _to_json({"phase": "finalized"}))
+
+    def _evict(self, body) -> None:
+        """Post-terminal cleanup, spawned like the step commands: requires a finalized move;
+        the CLI journals its completion, which is the fact the page's gate watches."""
+        try:
+            move_id = int(body["move"])
+        except (KeyError, TypeError, ValueError):
+            self._respond(400, "application/json", _to_json({"error": "expected {move}"}))
+            return
+        row = self.conn.execute(
+            "SELECT root_id, source_cell, phase FROM move WHERE id = %s", (move_id,)
+        ).fetchone()
+        if row is None or row[2] != "finalized":
+            self._respond(409, "application/json", _to_json({"error": "needs a finalized move"}))
+            return
+        args = [sys.executable, "-m", "monarch.cli", "evict", "--org-id", str(row[0]),
+                "--cell", row[1], "--move-id", str(move_id)]
+        proc = subprocess.Popen(args)
+        print(f"{datetime.now():%H:%M:%S} spawned `monarch {' '.join(args[3:])}` (pid {proc.pid})")
+        self._respond(202, "application/json", _to_json({"spawned": "evict"}))
 
     def _abort(self, body) -> None:
         try:

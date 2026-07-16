@@ -249,6 +249,7 @@ const TERMINAL = new Set(["finalized", "aborted"]);
 // two views, one page: "/" = the start page (fleet topology + move history; the default,
 // always); "?move=N" = one move's page. every move view is by id -- no follow mode
 const pinned = new URLSearchParams(location.search).get("move");
+if (pinned && !/^\d+$/.test(pinned)) location.replace("/");  // bad ?move= value: back to the start page
 let since = 0;
 
 if (pinned) {
@@ -298,6 +299,8 @@ async function pollMoves() {
 const unitTimes = {};
 // journal facts the conductor sequences on: which units have their publications
 const pubsCreated = new Set();
+// and whether the source copy is gone (the move-level event evict journals)
+let evicted = false;
 // blob stores are units too but have no publications; pub gates only consider the rest
 const blobStores = new Set();
 const needsPubs = () => lastUnits.filter(u => !blobStores.has(u.unit));
@@ -362,7 +365,7 @@ function appendEvents(events) {
       // old journals ended the copy on "-> streaming"; ??= keeps new moves' earlier mark
       else if (e.message.startsWith("-> streaming")) t.copied ??= e.at;
       else if (e.message.startsWith("publications created")) pubsCreated.add(e.unit);
-    }
+    } else if (e.message.startsWith("org evicted")) evicted = true;
     const li = document.createElement("li");
     const t = document.createElement("span"); t.className = "t";
     t.textContent = new Date(e.at).toLocaleTimeString("en-GB");
@@ -387,7 +390,7 @@ async function poll() {
     return;
   }
   if (!state.move) {
-    $("sub").textContent = `move #${pinned} not found`;
+    location.replace("/");  // pinned move isn't in the ledger: back to the start page
     return;
   }
   const m = state.move;
@@ -538,9 +541,25 @@ const ACTIONS = [
     },
     arm: m => !m || m.phase !== "active" ? "needs an active move"
       : !lastUnits.every(u => ["copied", "streaming"].includes(u.status)) ? "run snapshot first"
-      : null },
-  { label: "finalize", would: "drop slots + publications, evict org from source, phase → finalized (true point of no return)",
+      : !lastUnits.every(u => u.status === "streaming") ? "start the stream first — every store must have streamed"
+      : moversAlive ? "stop the stream first — flip only with movers stopped" : null },
+  { label: "finalize",
+    run: async note => {
+      const { ok, status, body } = await post("/finalize", { move: +pinned });
+      if (!ok) { note(body.error ?? `failed (${status}) — restart \`monarch dashboard\`?`); return false; }
+      note("finalized — slots + publications dropped; evict source copy is armed");
+      return true;
+    },
     arm: m => !m || m.phase !== "cut_over" ? "needs a cut-over move" : null },
+  { label: "evict source copy",
+    run: async note => {
+      const { ok, status, body } = await post("/evict", { move: +pinned });
+      if (!ok) { note(body.error ?? `failed (${status}) — restart \`monarch dashboard\`?`); return false; }
+      note("evict spawned — the journal confirms when the source copy is gone");
+      return true;
+    },
+    arm: m => !m || m.phase !== "finalized" ? "needs a finalized move"
+      : evicted ? "source copy already evicted" : null },
   { label: "abort move", danger: true,
     run: async note => {
       const { ok, status, body } = await post("/abort", { move: +pinned });
