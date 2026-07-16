@@ -299,21 +299,24 @@ class Handler(BaseHTTPRequestHandler):
         self._respond(200, "application/json", _to_json({"phase": "finalized"}))
 
     def _evict(self, body) -> None:
-        """Post-terminal cleanup, spawned like the step commands: requires a finalized move;
-        the CLI journals its completion, which is the fact the page's gate watches."""
+        """Post-terminal cleanup, spawned like the step commands: a finalized move evicts
+        the org's stale source copy, an aborted one scrubs the partial sink copy. The CLI
+        journals its completion, which is the fact the page's gate watches."""
         try:
             move_id = int(body["move"])
         except (KeyError, TypeError, ValueError):
             self._respond(400, "application/json", _to_json({"error": "expected {move}"}))
             return
         row = self.conn.execute(
-            "SELECT root_id, source_cell, phase FROM move WHERE id = %s", (move_id,)
+            "SELECT root_id, source_cell, sink_cell, phase FROM move WHERE id = %s", (move_id,)
         ).fetchone()
-        if row is None or row[2] != "finalized":
-            self._respond(409, "application/json", _to_json({"error": "needs a finalized move"}))
+        if row is None or row[3] not in ("finalized", "aborted"):
+            self._respond(409, "application/json",
+                          _to_json({"error": "needs a finalized or aborted move"}))
             return
+        cell = row[1] if row[3] == "finalized" else row[2]
         args = [sys.executable, "-m", "monarch.cli", "evict", "--org-id", str(row[0]),
-                "--cell", row[1], "--move-id", str(move_id)]
+                "--cell", cell, "--move-id", str(move_id)]
         proc = subprocess.Popen(args)
         print(f"{datetime.now():%H:%M:%S} spawned `monarch {' '.join(args[3:])}` (pid {proc.pid})")
         self._respond(202, "application/json", _to_json({"spawned": "evict"}))

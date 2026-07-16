@@ -564,11 +564,20 @@ const ACTIONS = [
     run: async note => {
       const { ok, status, body } = await post("/abort", { move: +pinned });
       if (!ok) { note(body.error ?? `failed (${status}) — restart \`monarch dashboard\`?`); return false; }
-      note("aborted — org never left the source; slots/publications + sink scrub are post-terminal cleanup (CLI)");
+      note("aborted — org never left the source; drop slots + publications via CLI, then scrub sink copy is armed");
       return true;
     },
     arm: m => !m || !["active", "draining"].includes(m.phase) ? "nothing abortable"
       : moversAlive ? "stop the stream first — movers are still alive" : null },
+  { label: "scrub sink copy",
+    run: async note => {
+      const { ok, status, body } = await post("/evict", { move: +pinned });
+      if (!ok) { note(body.error ?? `failed (${status}) — restart \`monarch dashboard\`?`); return false; }
+      note("evict spawned — the journal confirms when the sink's partial copy is gone");
+      return true;
+    },
+    arm: m => !m || m.phase !== "aborted" ? "needs an aborted move"
+      : evicted ? "sink copy already scrubbed" : null },
 ];
 
 // fired-but-not-yet-landed latch: a clicked run() button stays disabled until its effect
