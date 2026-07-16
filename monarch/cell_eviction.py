@@ -29,7 +29,7 @@ def run_evict(
     cell itself, so eviction is self-contained and idempotent: a re-run matches nothing.
     One transaction per database -- atomic per database, not across them (as everywhere)."""
     print(f"evict: removing org {root_id} from cell {cell.name}\n")
-    conn_for = {t: conns[db.dsn] for db in cell.databases for t in db.tables(graph)}
+    conn_for = {t: conns[db.primary_dsn] for db in cell.databases for t in db.tables(graph)}
     with ExitStack() as stack:
         for conn in conns.values():
             stack.enter_context(conn.transaction())

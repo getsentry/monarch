@@ -64,7 +64,7 @@ def cmd_create_publication(org_id: int, graph: Graph, source: Cell, ledger_dsn: 
     # journaled per unit -- the fact snapshot's conductor gate sequences on (publication
     # existence itself lives in the cell; the journal records that the step happened).
     with ExitStack() as stack:
-        conns = {db.dsn: stack.enter_context(connect(db.dsn)) for db in source.databases}
+        conns = {db.decode_dsn: stack.enter_context(connect(db.decode_dsn)) for db in source.databases}
         book = stack.enter_context(connect(ledger_dsn))
         m = move.find_active(book, org_id)
         frozen_ids = read_frozen_ids(graph, source, conns, org_id)
@@ -72,12 +72,12 @@ def cmd_create_publication(org_id: int, graph: Graph, source: Cell, ledger_dsn: 
         for db in source.databases:
             for store in db.stores:
                 ins_filters, mut_filters = slot.build_row_filters(
-                    graph, graph.store_tables(store), org_id, frozen_ids, conns[db.dsn]
+                    graph, graph.store_tables(store), org_id, frozen_ids, conns[db.decode_dsn]
                 )
-                with closing(connect(db.primary_dsn or db.dsn)) as admin:
+                with closing(connect(db.primary_dsn)) as admin:
                     try:
                         statements = slot.create_publications(
-                            admin, conns[db.dsn], org_id, store, ins_filters, mut_filters
+                            admin, conns[db.decode_dsn], org_id, store, ins_filters, mut_filters
                         )
                     except psycopg.errors.DuplicateObject as e:
                         # don't reuse in case the publication is stale
@@ -122,8 +122,8 @@ def cmd_snapshot(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: 
             if move.MoveUnit(m, store).status() is not move.UnitStatus.PENDING:
                 sys.exit(f"move #{m.id} already snapshotted ({store} is not pending)")
         try:
-            sinks = {db.dsn: stack.enter_context(connect(db.dsn)) for db in sink.databases}
-            conns = {db.dsn: stack.enter_context(connect(db.dsn)) for db in source.databases}
+            sinks = {db.primary_dsn: stack.enter_context(connect(db.primary_dsn)) for db in sink.databases}
+            conns = {db.decode_dsn: stack.enter_context(connect(db.decode_dsn)) for db in source.databases}
             frozen_ids = read_frozen_ids(graph, source, conns, org_id)
             # gate, not autocreate: the publications must predate the slots' consistent points
             # (pgoutput resolves them through each transaction's historic catalog snapshot), so
@@ -131,25 +131,25 @@ def cmd_snapshot(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: 
             for db in source.databases:
                 for store in db.stores:
                     for name in slot.publication_names(org_id, store):
-                        if not slot.publication_exists(conns[db.dsn], name):
+                        if not slot.publication_exists(conns[db.decode_dsn], name):
                             sys.exit(f"publication {name} missing on {db.dbname}")
             sources = []
             # slot creation on a standby blocks until a running-xacts record arrives from
             # the primary over physical replication -- an idle primary may not emit one for
             # minutes, so drip them ourselves until every slot has its consistent point.
-            # primary_dsn set = decode happens on a standby; a plain primary needs no nudge
-            primary_dsns = [db.primary_dsn for db in source.databases if db.primary_dsn]
+            # a standby set = decode happens there; a plain primary needs no nudge
+            primary_dsns = [db.primary_dsn for db in source.databases if db.standby_dsn]
             with slot.nudge_running_xacts(primary_dsns):
                 for db in source.databases:
                     for store in db.stores:
                         name = slot_name(org_id, store)
-                        lsn, snapshot = stack.enter_context(slot.create_slot(db.dsn, name))
+                        lsn, snapshot = stack.enter_context(slot.create_slot(db.decode_dsn, name))
                         print(f"slot {name} created at LSN {lsn} (snapshot {snapshot})")
                         unit = move.MoveUnit(m, store)
                         unit.transition(move.UnitStatus.COPYING, note=f"slot {name} at {lsn}")
                         # each store gets its own pinned connection -- colocated stores read
                         # their shared database on separate exported snapshots
-                        sconn = stack.enter_context(connect(db.dsn))
+                        sconn = stack.enter_context(connect(db.decode_dsn))
                         unit.record_copy_estimate(
                             estimate_rows(sconn, graph, graph.store_tables(store), org_id, frozen_ids)
                         )
@@ -191,7 +191,7 @@ def cmd_stream(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: st
         blob_names = [name for name, s in graph.stores.items() if isinstance(s, BlobStore)]
         blob_members = {name: BlobMembership(book, m.id, name) for name in blob_names}
         units = {store: move.MoveUnit(m, store) for store in pg_stores + blob_names}
-        sinks = {db.dsn: stack.enter_context(connect(db.dsn)) for db in sink.databases}
+        sinks = {db.primary_dsn: stack.enter_context(connect(db.primary_dsn)) for db in sink.databases}
         membership = derive_membership(sinks, sink, graph, org_id)
         if not membership.get(graph.root):
             sys.exit(f"org {org_id} not in sink {sink_name} -- run `snapshot` first")
@@ -202,8 +202,8 @@ def cmd_stream(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: st
             for store in db.stores:
                 # one stream per store: its own replication connection, slot, and
                 # publication pair -- colocated stores tail their shared WAL separately
-                conn = stack.enter_context(connect(db.dsn))
-                repl = stack.enter_context(closing(slot.connect_replication(db.dsn)))
+                conn = stack.enter_context(connect(db.decode_dsn))
+                repl = stack.enter_context(closing(slot.connect_replication(db.decode_dsn)))
                 pubs = ",".join(slot.publication_names(org_id, store))
                 sources.append(StreamSource(store, conn, repl, slot_name(org_id, store), pubs))
         try:
@@ -224,7 +224,7 @@ def cmd_evict(org_id: int, graph: Graph, cell: Cell, ledger_dsn: str, move_id: i
     # the eviction to the sink as ordinary deletes (evict.py). Checked per database on the
     # decode endpoint -- slots live where decoding happens.
     for db in cell.databases:
-        with connect(db.dsn) as decode:
+        with connect(db.decode_dsn) as decode:
             for store in db.stores:
                 live = decode.execute(
                     "SELECT 1 FROM pg_replication_slots WHERE slot_name = %s",
@@ -232,9 +232,8 @@ def cmd_evict(org_id: int, graph: Graph, cell: Cell, ledger_dsn: str, move_id: i
                 ).fetchone()
                 if live:
                     sys.exit(f"slot {slot_name(org_id, store)} still exists -- run drop-slot first")
-    # the deletes are writes: they run on the primary (dsn is a read-only standby when split)
     with ExitStack() as stack:
-        conns = {db.dsn: stack.enter_context(connect(db.primary_dsn or db.dsn)) for db in cell.databases}
+        conns = {db.primary_dsn: stack.enter_context(connect(db.primary_dsn)) for db in cell.databases}
         buckets = {name: Bucket(loc["file_path"]) for name, loc in cell.blobs.items()}
         run_evict(conns, cell, graph, org_id, buckets)
     # the completion is journaled against the move -- the fact the dashboard's gate watches
@@ -294,13 +293,13 @@ def main() -> None:
                 pass
         case "drop-slot":
             for db in cells[args.source].databases:
-                with connect(db.dsn) as conn:
+                with connect(db.decode_dsn) as conn:
                     for store in db.stores:
                         slot.drop_replication_slot(conn, slot_name(args.org_id, store))
                         print(f"slot {slot_name(args.org_id, store)} dropped")
         case "drop-publication":
             for db in cells[args.source].databases:
-                with connect(db.primary_dsn or db.dsn) as admin:
+                with connect(db.primary_dsn) as admin:
                     for store in db.stores:
                         for name in slot.publication_names(args.org_id, store):
                             slot.drop_publication(admin, name)

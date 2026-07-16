@@ -150,13 +150,17 @@ def load_graph(path: str) -> Graph:
 
 @dataclass(frozen=True)
 class Database:
-    dsn: str
+    primary_dsn: str                # always exists; writes and DDL run here
     stores: list[str]
-    primary_dsn: str | None = None  # where DDL runs when dsn is a standby; None = dsn is the primary
+    standby_dsn: str | None = None  # decode + reads run here when present
+
+    @property
+    def decode_dsn(self) -> str:
+        return self.standby_dsn or self.primary_dsn
 
     @property
     def dbname(self) -> str:
-        return dict(p.split("=", 1) for p in self.dsn.split())["dbname"]
+        return dict(p.split("=", 1) for p in self.primary_dsn.split())["dbname"]
 
     def tables(self, graph: Graph) -> list[str]:
         """The tables this database hosts, in graph order."""
@@ -170,7 +174,7 @@ class Cell:
     blobs: dict[str, dict]  # blob store name -> location in this cell (file_path)
 
     def dsn_for(self, store: str) -> str:
-        return next(db.dsn for db in self.databases if store in db.stores)
+        return next(db.decode_dsn for db in self.databases if store in db.stores)
 
     def validate(self, graph: Graph) -> None:
         """TODO: check this cell against the manifest so a bad fleet.yaml fails at startup
@@ -193,7 +197,7 @@ def load_cells(path: str) -> dict[str, Cell]:
     return {
         name: Cell(
             name,
-            [Database(d["dsn"], d["stores"], d.get("primary_dsn")) for d in c["databases"]],
+            [Database(d["primary_dsn"], d["stores"], d.get("standby_dsn")) for d in c["databases"]],
             c.get("blobs", {}),
         )
         for name, c in raw["cells"].items()

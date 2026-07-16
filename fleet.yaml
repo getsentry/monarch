@@ -12,13 +12,14 @@
 cells:
   source:
     databases:
-      # dsn = decode endpoint (the standby); primary_dsn = the primary, where DDL runs
-      # (per-org publications are created there and replicate physically to the standby)
-      - dsn: host=127.0.0.1 port=5434 user=monarch password=monarch dbname=source
-        primary_dsn: host=127.0.0.1 port=5433 user=monarch password=monarch dbname=source
+      # primary_dsn = writes and DDL, always present; standby_dsn = decode + reads when
+      # present (per-org publications are created on the primary and replicate physically
+      # to the standby, where pgoutput reads them)
+      - primary_dsn: host=127.0.0.1 port=5433 user=monarch password=monarch dbname=source
+        standby_dsn: host=127.0.0.1 port=5434 user=monarch password=monarch dbname=source
         stores: [default, attachments]
-      - dsn: host=127.0.0.1 port=5434 user=monarch password=monarch dbname=source_files
-        primary_dsn: host=127.0.0.1 port=5433 user=monarch password=monarch dbname=source_files
+      - primary_dsn: host=127.0.0.1 port=5433 user=monarch password=monarch dbname=source_files
+        standby_dsn: host=127.0.0.1 port=5434 user=monarch password=monarch dbname=source_files
         stores: [files]
     # blob stores have no slot/stream; the cell just names its bucket (a directory in the demo)
     blobs:
@@ -26,7 +27,7 @@ cells:
       attachment_blobs: { file_path: mock_storages/buckets/attachment_blobs/source }
   sink:
     databases:
-      - dsn: host=127.0.0.1 port=5432 user=monarch password=monarch dbname=sink
+      - primary_dsn: host=127.0.0.1 port=5432 user=monarch password=monarch dbname=sink
         stores: [default, attachments, files]
     blobs:
       filestore: { file_path: mock_storages/buckets/filestore/sink }

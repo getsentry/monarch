@@ -88,7 +88,7 @@ def derive_membership(
     the applied-and-acked rows -- snapshot's copy plus streamed changes -- so first start
     and restart are the same read, and a parent grown mid-stream survives a restart.
     Same parents-first walk as the snapshot; parents only, since only they scope others."""
-    conn_for = {t: sinks[db.dsn] for db in sink.databases for t in db.tables(graph)}
+    conn_for = {t: sinks[db.primary_dsn] for db in sink.databases for t in db.tables(graph)}
     keys: dict[str, list[int]] = {}
     for table in graph.topological_sort():
         if table not in graph.parents:
@@ -164,7 +164,7 @@ def run_snapshot(
     such rows until their DELETEs stream through."""
     print(f"snapshot: scoping org {root_id}\n")
     source_for = {t: s.conn for s in sources for t in graph.store_tables(s.store)}
-    sink_for = {t: sinks[db.dsn] for db in sink.databases for t in db.tables(graph)}
+    sink_for = {t: sinks[db.primary_dsn] for db in sink.databases for t in db.tables(graph)}
     for s in sources:
         s.conn.isolation_level = IsolationLevel.REPEATABLE_READ
     with ExitStack() as stack:
