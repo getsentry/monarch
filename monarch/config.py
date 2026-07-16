@@ -9,6 +9,7 @@ from functools import cached_property
 from typing import Literal
 
 import yaml
+from psycopg.conninfo import conninfo_to_dict
 
 Eviction = Literal["delete", "keep"]
 
@@ -160,7 +161,7 @@ class Database:
 
     @property
     def dbname(self) -> str:
-        return dict(p.split("=", 1) for p in self.primary_dsn.split())["dbname"]
+        return conninfo_to_dict(self.primary_dsn)["dbname"]
 
     def tables(self, graph: Graph) -> list[str]:
         """The tables this database hosts, in graph order."""

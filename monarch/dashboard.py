@@ -295,7 +295,7 @@ class Handler(BaseHTTPRequestHandler):
         ).fetchall()
         for (unit,) in units:
             move.MoveUnit(m, unit).transition(move.UnitStatus.STREAM_ENDED, note="teardown")
-        m.transition(move.Phase.FINALIZED, note="slots + publications dropped; source copy awaits eviction (CLI)")
+        m.transition(move.Phase.FINALIZED, note="slots + publications dropped; source copy awaits eviction")
         self._respond(200, "application/json", _to_json({"phase": "finalized"}))
 
     def _evict(self, body) -> None:
