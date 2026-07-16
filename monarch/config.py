@@ -1,4 +1,4 @@
-"""Configuration: the manifest (postgres_config.yaml) is cell-independent schema knowledge --
+"""Configuration: the manifest is cell-independent schema knowledge --
 stores, table placement, scoping edges. fleet.yaml is per-cell deployment reality: which
 database physically hosts each logical store (big cells split stores across clusters, small
 cells colocate several in one database)."""

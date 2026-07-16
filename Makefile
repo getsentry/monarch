@@ -7,7 +7,7 @@ SOURCE_PSQL := $(COMPOSE) exec -T primary psql -U monarch -v ON_ERROR_STOP=1 -q
 
 .PHONY: up down install databases schema data reset demo verify snapshot opt-in-group \
 	traffic evict-source evict-sink psql-source psql-standby psql-files psql-sink \
-	psql-ledger rust-schema rust-data demo-rs
+	psql-ledger
 
 up:
 	$(COMPOSE) up -d
@@ -123,17 +123,3 @@ evict-source:
 
 evict-sink:
 	uv run monarch evict --org-id $(ORG) --cell sink
-
-# ---- legacy rust demo: single store only with pg14 source ----
-rust-schema: databases
-	@$(PSQL) -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='source'" | grep -q 1 || $(PSQL) -d postgres -c "CREATE DATABASE source"
-	-uv run python mock_storages/generate_schema.py | $(PSQL) -d source
-
-rust-data:
-	uv run python mock_storages/generate_data.py | $(PSQL) -d source
-
-demo-rs:
-	cargo run -q -- snapshot --org-id $(ORG)
-	$(PSQL) -d source -c 'INSERT INTO "group" (project_id) VALUES (1)'
-	cargo run -q -- stream --org-id $(ORG) & PID=$$!; sleep 5; kill $$PID
-	cargo run -q -- drop-slot --org-id $(ORG)

@@ -2,7 +2,7 @@ import os
 
 import yaml
 
-CONFIG = os.path.join(os.path.dirname(__file__), "..", "postgres_config.yaml")
+CONFIG = os.path.join(os.path.dirname(__file__), "..", "manifest.yaml")
 FLEET = os.path.join(os.path.dirname(__file__), "..", "fleet.yaml")
 
 # table -> {column -> ref}, where ref is {"parent": table} (FK edge) or {"blob": store} (blob key).
@@ -11,7 +11,7 @@ Tables = dict[str, dict[str, dict]]
 
 
 def load_from_config() -> tuple[str, Tables, dict[str, str]]:
-    """Parse postgres_config.yaml into (root, tables, store_of): each table's columns mapped to
+    """Parse manifest.yaml into (root, tables, store_of): each table's columns mapped to
     their ref, plus each table's logical store."""
     with open(CONFIG) as f:
         cfg = yaml.safe_load(f)

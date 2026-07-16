@@ -529,6 +529,16 @@ const ACTIONS = [
       return true;
     },
     arm: m => moversAlive ? null : "no live movers" },
+  { label: "drain + cut over",
+    run: async note => {
+      const { ok, status, body } = await post("/cutover", { move: +pinned });
+      if (!ok) { note(body.error ?? `failed (${status}) — restart \`monarch dashboard\`?`); return false; }
+      note("phase → draining → cut_over — demo only: no gates checked, routing flip is a no-op");
+      return true;
+    },
+    arm: m => !m || m.phase !== "active" ? "needs an active move"
+      : !lastUnits.every(u => ["copied", "streaming"].includes(u.status)) ? "run snapshot first"
+      : null },
   { label: "finalize", would: "drop slots + publications, evict org from source, phase → finalized (true point of no return)",
     arm: m => !m || m.phase !== "cut_over" ? "needs a cut-over move" : null },
   { label: "abort move", danger: true,

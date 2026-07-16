@@ -14,7 +14,7 @@ from .membership import BlobMembership
 from .snapshot import Source, derive_membership, estimate_rows, run_snapshot
 from .stream import StreamSource, run_streams
 
-CONFIG = "postgres_config.yaml"
+CONFIG = "manifest.yaml"
 FLEET = "fleet.yaml"
 
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Seed the source cell from postgres_config.yaml: print INSERTs for ORG_COUNT orgs (named
+Seed the source cell from manifest.yaml: print INSERTs for ORG_COUNT orgs (named
 sentry-1, sentry-2, ...) and, in the same pass, write a dummy blob into the filestore for
 every blob-backed row so its file.path has real bytes.
 

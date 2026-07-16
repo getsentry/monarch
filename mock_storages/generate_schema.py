@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Uses postgres_config.yaml to generate a Sentry-like schema with realistic FK
+Uses manifest.yaml to generate a Sentry-like schema with realistic FK
 relationships. This is applied to the source and sink databases for the demo.
 """
 import sys

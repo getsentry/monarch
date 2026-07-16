@@ -32,7 +32,7 @@ _stream_proc: subprocess.Popen | None = None  # the last stream child; dies with
 
 def describe_topology(graph: Graph, cells: dict[str, Cell]) -> dict:
     """Static topology, computed once from the manifest + fleet: the diagram is a rendering
-    of config, so a store added to postgres_config.yaml grows a node with no UI change.
+    of config, so a store added to manifest.yaml grows a node with no UI change.
     `binds` = the spine tables (or, for blob stores, the referencing stores) a store hangs
     off -- cross-store edges only; intra-store FK detail stays out of diagram geometry.
     `placement` maps store -> hosting database per cell, which is how the page tints each
@@ -185,6 +185,8 @@ class Handler(BaseHTTPRequestHandler):
             self._spawn_step(body, "stream")
         elif path == "/stop-stream":
             self._stop_stream()
+        elif path == "/cutover":
+            self._cutover(body)
         elif path == "/abort":
             self._abort(body)
         else:
@@ -221,6 +223,22 @@ class Handler(BaseHTTPRequestHandler):
                           _to_json({"error": "SIGINT sent but exit unconfirmed"}))
             return
         self._respond(200, "application/json", _to_json({"stopped": _stream_proc.pid}))
+
+    def _cutover(self, body) -> None:
+        """Demo drain + cut-over: two phase CASes and their journal lines, nothing else --
+        no gate checks, no routing flip. The ledger story without the machinery, for now."""
+        try:
+            move_id = int(body["move"])
+        except (KeyError, TypeError, ValueError):
+            self._respond(400, "application/json", _to_json({"error": "expected {move}"}))
+            return
+        m = move.Move(self.conn, move_id)
+        if not m.transition(move.Phase.DRAINING, note="demo: org writes assumed stopped"):
+            self._respond(409, "application/json",
+                          _to_json({"error": "needs an active move — the phase moved on"}))
+            return
+        m.transition(move.Phase.CUT_OVER, note="demo: routing flip is a no-op here")
+        self._respond(200, "application/json", _to_json({"phase": "cut_over"}))
 
     def _abort(self, body) -> None:
         try:

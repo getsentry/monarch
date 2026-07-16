@@ -24,7 +24,7 @@ an interactive walkthrough of the end-to-end process.
 
 Two files, deliberately split:
 
-- **`postgres_config.yaml`** — cell-independent schema knowledge.
+- **`manifest.yaml`** — cell-independent schema knowledge.
   The root table (`organization`), the logical **stores** (Postgres stores and
   blob stores), which store each table lives in, the **scope edges** (the
   column that ties every row to a parent, and transitively to the org),
