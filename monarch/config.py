@@ -191,9 +191,41 @@ class Cell:
         return next(db.decode_dsn for db in self.databases if store in db.stores)
 
     def validate(self, graph: Graph) -> None:
-        """TODO: check this cell against the manifest so a bad fleet.yaml fails at startup
-        instead of as a KeyError mid-move: every postgres store placed in exactly one of the
-        cell's databases, only postgres stores in placements, every blob store located."""
+        """Cross-check this cell against the manifest so a bad fleet.yaml fails at startup
+        instead of as a KeyError mid-move: only postgres stores appear in database
+        placements, every postgres store the manifest declares is hosted by exactly one of
+        the cell's databases, and every blob store has a location (with no stray ones)."""
+        hosts: dict[str, int] = {}  # postgres store -> databases placing it
+        for db in self.databases:
+            for store in db.stores:
+                match graph.stores.get(store):
+                    case None:
+                        raise ValueError(
+                            f"cell {self.name}: database placement names unknown store {store!r}"
+                        )
+                    case PostgresStore():
+                        hosts[store] = hosts.get(store, 0) + 1
+                    case _:
+                        raise ValueError(
+                            f"cell {self.name}: {store!r} is a blob store and cannot be placed"
+                            " in a database"
+                        )
+        for name, store in graph.stores.items():
+            if isinstance(store, PostgresStore) and hosts.get(name, 0) != 1:
+                found = "no database" if name not in hosts else f"{hosts[name]} databases"
+                raise ValueError(
+                    f"cell {self.name}: postgres store {name!r} must be hosted by exactly one"
+                    f" database, found in {found}"
+                )
+            if isinstance(store, BlobStore) and name not in self.blobs:
+                raise ValueError(
+                    f"cell {self.name}: blob store {name!r} has no location in fleet.yaml"
+                )
+        for name in self.blobs:
+            if not isinstance(graph.stores.get(name), BlobStore):
+                raise ValueError(
+                    f"cell {self.name}: blob location {name!r} is not a manifest blob store"
+                )
 
 
 def list_units(graph: Graph, source: Cell) -> list[str]:
