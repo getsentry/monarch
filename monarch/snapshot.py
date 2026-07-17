@@ -27,7 +27,7 @@ def estimate_predicate(
     (config.validate forbids cross-store dynamic scope edges), so the subquery always runs.
     None = not org-scoped; the walk doesn't copy it either."""
     if table == graph.root:
-        return f"id = {org_id}"
+        return f"{graph.primary_key_of[table][0]} = {org_id}"
     if (edge := graph.scope_edge(table)) is None:
         return None
     if edge.parent == graph.root:
@@ -36,7 +36,8 @@ def estimate_predicate(
         ids = frozen_ids[edge.parent]
         return f"{edge.column} IN ({', '.join(map(str, ids))})" if ids else "false"
     inner = estimate_predicate(graph, edge.parent, org_id, frozen_ids)
-    return f'{edge.column} IN (SELECT id FROM "{edge.parent}" WHERE {inner})'
+    parent_key = graph.primary_key_of[edge.parent][0]
+    return f'{edge.column} IN (SELECT {parent_key} FROM "{edge.parent}" WHERE {inner})'
 
 
 def estimate_rows(
@@ -64,13 +65,15 @@ def estimate_rows(
 def scope_predicate(
     graph: Graph, table: str, keys: dict[str, list[int]], root_id: int
 ) -> tuple[str, sql.Composable] | None:
-    """The WHERE predicate scoping <table> to the org: `id = <root_id>` for the root, otherwise
-    `<col> IN (<parent keys>)` for the table's scope edge (graph.scope_edge). Returns None if the
-    table has no such edge, or that parent has no in-scope rows. Reused for both the id select
-    (child scoping) and the COPY extract.
+    """The WHERE predicate scoping <table> to the org: `<primary key> = <root_id>` for the root,
+    otherwise `<col> IN (<parent keys>)` for the table's scope edge (graph.scope_edge). Returns
+    None if the table has no such edge, or that parent has no in-scope rows. Reused for both the
+    key select (child scoping) and the COPY extract.
     Literal IN suits the toy data; a high-cardinality parent is where = ANY(array) would kick in."""
     if table == graph.root:
-        return "root", sql.SQL("id = {}").format(sql.Literal(root_id))
+        return "root", sql.SQL("{} = {}").format(
+            sql.Identifier(graph.primary_key_of[table][0]), sql.Literal(root_id)
+        )
     edge = graph.scope_edge(table)
     if edge is None:
         return None
@@ -96,7 +99,9 @@ def derive_membership(
         if (scope := scope_predicate(graph, table, keys, root_id)) is None:
             continue
         _, pred = scope
-        select = sql.SQL("SELECT id FROM {} WHERE {}").format(sql.Identifier(table), pred)
+        select = sql.SQL("SELECT {} FROM {} WHERE {}").format(
+            sql.Identifier(graph.primary_key_of[table][0]), sql.Identifier(table), pred
+        )
         keys[table] = [r[0] for r in conn_for[table].execute(select).fetchall()]
     return {table: set(ids) for table, ids in keys.items()}
 
@@ -183,9 +188,13 @@ def run_snapshot(
                 print(f"  {table:<16} (no rows in scope)")
                 continue
             scoped_by, pred = scope
-            # ids feed child scoping (and become the streams' initial membership)
-            select = sql.SQL("SELECT id FROM {} WHERE {}").format(sql.Identifier(table), pred)
-            keys[table] = [r[0] for r in source_for[table].execute(select).fetchall()]
+            if table in graph.parents:
+                # keys feed child scoping (and become the streams' initial membership);
+                # only parents scope others, and only they are single-key (config.validate)
+                select = sql.SQL("SELECT {} FROM {} WHERE {}").format(
+                    sql.Identifier(graph.primary_key_of[table][0]), sql.Identifier(table), pred
+                )
+                keys[table] = [r[0] for r in source_for[table].execute(select).fetchall()]
             scoped.append((table, scoped_by, pred))
 
         # Clear any prior copy of the org from the sink, children first, so re-running is safe
@@ -200,5 +209,5 @@ def run_snapshot(
             extra = f" + {blobs} key(s)" if table in graph.blobs else ""
             print(f"  {table:<16} via {scoped_by:<18} {copied} row(s){extra} -> sink")
 
-    # Membership keeps only tables something references as a parent
-    return {table: set(ids) for table, ids in keys.items() if table in graph.parents}
+    # keys already holds only tables something references as a parent
+    return {table: set(ids) for table, ids in keys.items()}

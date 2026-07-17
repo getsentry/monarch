@@ -53,7 +53,8 @@ def build_row_filters(
     mut: dict[str, str | None] = {}
     for table in tables:
         if table == graph.root:
-            column, predicate = "id", f"id = {org_id}"
+            key = graph.primary_key_of[table][0]
+            column, predicate = key, f"{key} = {org_id}"
         elif (edge := graph.publication_edge(table)) is None:
             ins[table] = mut[table] = None
             continue
@@ -111,9 +112,14 @@ def create_publications(
     def render(filters: dict[str, str | None]) -> str:
         return ",\n  ".join(f'"{t}" WHERE ({p})' if p else f'"{t}"' for t, p in filters.items())
 
+    # publish_via_partition_root: a partitioned table's changes decode as the root relation,
+    # not grouping_records_p37-style leaf partitions the graph has never heard of. No effect
+    # on unpartitioned tables.
     statements = [
-        f"CREATE PUBLICATION {ins} FOR TABLE\n  {render(ins_filters)}\nWITH (publish = 'insert')",
-        f"CREATE PUBLICATION {mut} FOR TABLE\n  {render(mut_filters)}\nWITH (publish = 'update, delete, truncate')",
+        f"CREATE PUBLICATION {ins} FOR TABLE\n  {render(ins_filters)}\n"
+        "WITH (publish = 'insert', publish_via_partition_root = true)",
+        f"CREATE PUBLICATION {mut} FOR TABLE\n  {render(mut_filters)}\n"
+        "WITH (publish = 'update, delete, truncate', publish_via_partition_root = true)",
     ]
     for statement in statements:
         admin.execute(statement)

@@ -1,0 +1,1480 @@
+root: sentry_organization
+stores:
+  default:
+    type: postgres
+  crons:
+    type: postgres
+  files:
+    type: postgres
+  performance_metrics:
+    type: postgres
+  metrics:
+    type: postgres
+  attachments:
+    type: postgres
+  filestore:
+    type: blob_store
+    eviction: keep
+  objectstore:
+    type: blob_store
+    eviction: delete
+relationships:
+  sentry_organization:
+    store: default
+    primary_key:
+    - id
+  sentry_discoversavedquery:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  explore_exploresavedquery:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  explore_exploresavedquerylastvisited:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  explore_exploresavedquerystarred:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  explore_traceitemattributecontext:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  explore_traceitemattributevaluecontext:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  flags_audit_log:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  flags_webhooksigningsecret:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  hybridcloud_apikeyreplica:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  hybridcloud_apitokenreplica:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  hybridcloud_orgauthtokenreplica:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  insights_starred_segments:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_monitor:
+    store: crons
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+      project_id:
+        parent: sentry_project
+  sentry_notificationaction:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_preprodartifactsizecomparison:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  replays_replaydeletionjob:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+      project_id:
+        parent: sentry_project
+  seer_nightshiftrun:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  seer_seerrun:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  seer_workflowconfig:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_alertrule:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_artifactbundle:
+    store: files
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_artifactbundleindex:
+    store: files
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_authproviderreplica:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_code_review_event:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_commit:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_commitauthor:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_commitcomparison:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_commitfilechange:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_dashboard:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_dashboardfavoriteuser:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_dataforwarder:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_debugidartifactbundle:
+    store: files
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_deletedproject:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_deletedteam:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_deploy:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_distribution:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_environment:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_exporteddata:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_externalactor:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_externalissue:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_featureadoption:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_fileblobowner:
+    store: files
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_grouphistory:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_groupinbox:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_groupowner:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_groupredirect:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_groupsearchview:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_groupsearchviewlastvisited:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_groupsearchviewstarred:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_incident:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_organizationavatar:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_organizationcontributors:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_organizationmember:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_organizationmemberinvite:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_organizationonboardingtask:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_organizationoptions:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_perfstringindexer:
+    store: performance_metrics
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_proguardartifactrelease:
+    store: files
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+      project_id:
+        parent: sentry_project
+  sentry_project:
+    store: default
+    primary_key:
+    - id
+    static: true
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_projectartifactbundle:
+    store: files
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+      project_id:
+        parent: sentry_project
+  sentry_projectredirect:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_projecttransactionthreshold:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_projecttransactionthresholdoverride:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_promptsactivity:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+      project_id:
+        parent: sentry_project
+  sentry_pull_request:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_recentsearch:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_release:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_releaseartifactbundle:
+    store: files
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_releasecommit:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+      project_id:
+        parent: sentry_project
+  sentry_environmentrelease:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+      project_id:
+        parent: sentry_project
+  sentry_releasefile:
+    store: files
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+      project_id:
+        parent: sentry_project
+  sentry_releaseheadcommit:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_repository:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_repositoryprojectpathconfig:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_rollbackorganization:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_rollbackuser:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_sentryshot:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_servicehook:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+      project_id:
+        parent: sentry_project
+  sentry_stringindexer:
+    store: metrics
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_team:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_performanceteamkeytransaction:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  workflow_engine_dataconditiongroup:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  workflow_engine_datasource:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  workflow_engine_workflow:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_id:
+        parent: sentry_organization
+  sentry_discoversavedqueryproject:
+    store: default
+    primary_key:
+    - id
+    refs:
+      discover_saved_query_id:
+        parent: sentry_discoversavedquery
+  explore_exploresavedqueryproject:
+    store: default
+    primary_key:
+    - id
+    refs:
+      explore_saved_query_id:
+        parent: explore_exploresavedquery
+  sentry_monitorcheckin:
+    store: crons
+    primary_key:
+    - id
+    refs:
+      monitor_id:
+        parent: sentry_monitor
+      project_id:
+        parent: sentry_project
+  sentry_monitorenvironment:
+    store: crons
+    primary_key:
+    - id
+    refs:
+      monitor_id:
+        parent: sentry_monitor
+  sentry_monitorincident:
+    store: crons
+    primary_key:
+    - id
+    refs:
+      monitor_id:
+        parent: sentry_monitor
+  sentry_notificationactionproject:
+    store: default
+    primary_key:
+    - id
+    refs:
+      action_id:
+        parent: sentry_notificationaction
+  seer_nightshiftrunissue:
+    store: default
+    primary_key:
+    - id
+    refs:
+      run_id:
+        parent: seer_nightshiftrun
+  seer_nightshiftrunshard:
+    store: default
+    primary_key:
+    - id
+    refs:
+      run_id:
+        parent: seer_nightshiftrun
+  seer_seeragentrun:
+    store: default
+    primary_key:
+    - id
+    refs:
+      run_id:
+        parent: seer_seerrun
+  seer_seerrunpullrequest:
+    store: default
+    primary_key:
+    - id
+    refs:
+      seer_run_id:
+        parent: seer_seerrun
+  sentry_alertruleactivity:
+    store: default
+    primary_key:
+    - id
+    refs:
+      alert_rule_id:
+        parent: sentry_alertrule
+  sentry_alertruleprojects:
+    store: default
+    primary_key:
+    - id
+    refs:
+      alert_rule_id:
+        parent: sentry_alertrule
+  sentry_alertruletrigger:
+    store: default
+    primary_key:
+    - id
+    refs:
+      alert_rule_id:
+        parent: sentry_alertrule
+  sentry_rulesnooze:
+    store: default
+    primary_key:
+    - id
+    refs:
+      alert_rule_id:
+        parent: sentry_alertrule
+  workflow_engine_alertruledetector:
+    store: default
+    primary_key:
+    - id
+    refs:
+      alert_rule_id:
+        parent: sentry_alertrule
+  workflow_engine_alertruleworkflow:
+    store: default
+    primary_key:
+    - id
+    refs:
+      alert_rule_id:
+        parent: sentry_alertrule
+  sentry_preprodartifact:
+    store: default
+    primary_key:
+    - id
+    refs:
+      commit_id:
+        parent: sentry_commit
+  sentry_groupcommitresolution:
+    store: default
+    primary_key:
+    - id
+    refs:
+      commit_id:
+        parent: sentry_commit
+  sentry_groupreaction:
+    store: default
+    primary_key:
+    - id
+    refs:
+      commit_id:
+        parent: sentry_commit
+  sentry_latestrelease:
+    store: default
+    primary_key:
+    - id
+    refs:
+      commit_id:
+        parent: sentry_commit
+  sentry_pullrequest_commit:
+    store: default
+    primary_key:
+    - id
+    refs:
+      commit_id:
+        parent: sentry_commit
+  sentry_dashboardfieldlink:
+    store: default
+    primary_key:
+    - id
+    refs:
+      dashboard_id:
+        parent: sentry_dashboard
+  sentry_dashboardpermissions:
+    store: default
+    primary_key:
+    - id
+    refs:
+      dashboard_id:
+        parent: sentry_dashboard
+  sentry_dashboardproject:
+    store: default
+    primary_key:
+    - id
+    refs:
+      dashboard_id:
+        parent: sentry_dashboard
+  sentry_dashboardrevision:
+    store: default
+    primary_key:
+    - id
+    refs:
+      dashboard_id:
+        parent: sentry_dashboard
+  sentry_dashboardwidget:
+    store: default
+    primary_key:
+    - id
+    refs:
+      dashboard_id:
+        parent: sentry_dashboard
+  sentry_dataforwarderproject:
+    store: default
+    primary_key:
+    - id
+    refs:
+      data_forwarder_id:
+        parent: sentry_dataforwarder
+  sentry_environmentproject:
+    store: default
+    primary_key:
+    - id
+    refs:
+      environment_id:
+        parent: sentry_environment
+  sentry_groupenvironment:
+    store: default
+    primary_key:
+    - id
+    refs:
+      environment_id:
+        parent: sentry_environment
+  sentry_releaseprojectenvironment:
+    store: default
+    primary_key:
+    - id
+    refs:
+      environment_id:
+        parent: sentry_environment
+  sentry_releasethreshold:
+    store: default
+    primary_key:
+    - id
+    refs:
+      environment_id:
+        parent: sentry_environment
+  sentry_rule:
+    store: default
+    primary_key:
+    - id
+    refs:
+      environment_id:
+        parent: sentry_environment
+  sentry_snubaquery:
+    store: default
+    primary_key:
+    - id
+    refs:
+      environment_id:
+        parent: sentry_environment
+  sentry_userreport:
+    store: attachments
+    primary_key:
+    - id
+    refs:
+      environment_id:
+        parent: sentry_environment
+      project_id:
+        parent: sentry_project
+  sentry_exporteddatablob:
+    store: default
+    primary_key:
+    - id
+    refs:
+      data_export_id:
+        parent: sentry_exporteddata
+  sentry_groupsearchviewproject:
+    store: default
+    primary_key:
+    - id
+    refs:
+      group_search_view_id:
+        parent: sentry_groupsearchview
+  sentry_incidentactivity:
+    store: default
+    primary_key:
+    - id
+    refs:
+      incident_id:
+        parent: sentry_incident
+  sentry_incidentproject:
+    store: default
+    primary_key:
+    - id
+    refs:
+      incident_id:
+        parent: sentry_incident
+  workflow_engine_incidentgroupopenperiod:
+    store: default
+    primary_key:
+    - id
+    refs:
+      incident_id:
+        parent: sentry_incident
+  sentry_organizationcontributoraction:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organization_contributor_id:
+        parent: sentry_organizationcontributors
+  sentry_organizationmemberreplayaccess:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organizationmember_id:
+        parent: sentry_organizationmember
+  sentry_organizationaccessrequest:
+    store: default
+    primary_key:
+    - id
+    refs:
+      member_id:
+        parent: sentry_organizationmember
+  sentry_organizationmember_teams:
+    store: default
+    primary_key:
+    - id
+    refs:
+      organizationmember_id:
+        parent: sentry_organizationmember
+  sentry_preprodbuildconfiguration:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  replays_replayrecordingsegment:
+    store: attachments
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_activity:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_projectcounter:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_custominboundfilter:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_eventattachment:
+    store: attachments
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+      blob_path:
+        blob: filestore
+  sentry_groupedmessage:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_groupactionlogentry:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_groupasignee:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_groupbookmark:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_groupemailthread:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_grouphash:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_grouplink:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_groupopenperiod:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_grouprelease:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_grouprulestatus:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_groupseen:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_groupshare:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_groupsubscription:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_grouptombstone:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_platformexternalissue:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_profilechunkattachment:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+      stored_id:
+        blob: objectstore
+  sentry_projectbookmark:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_projectcodeowners:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_projectdsymfile:
+    store: files
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_projectkey:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_projectoptions:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_projectownership:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_projectplatform:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_projectrepository:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_projectsdk:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_projectteam:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_querysubscription:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_regressiongroup:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_release_project:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_servicehookproject:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_weeklyreportprojectexclusion:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  tempest_tempestcredentials:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  workflow_engine_detector:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_id:
+        parent: sentry_project
+  sentry_pullrequest_activity:
+    store: default
+    primary_key:
+    - id
+    refs:
+      pull_request_id:
+        parent: sentry_pull_request
+  sentry_pullrequest_attribution:
+    store: default
+    primary_key:
+    - id
+    refs:
+      pull_request_id:
+        parent: sentry_pull_request
+  sentry_pullrequest_comment:
+    store: default
+    primary_key:
+    - id
+    refs:
+      pull_request_id:
+        parent: sentry_pull_request
+  sentry_pullrequest_metrics:
+    store: default
+    primary_key:
+    - id
+    refs:
+      pull_request_id:
+        parent: sentry_pull_request
+  sentry_groupresolution:
+    store: default
+    primary_key:
+    - id
+    refs:
+      release_id:
+        parent: sentry_release
+  sentry_releaseactivity:
+    store: default
+    primary_key:
+    - id
+    refs:
+      release_id:
+        parent: sentry_release
+  sentry_repositorysettings:
+    store: default
+    primary_key:
+    - id
+    refs:
+      repository_id:
+        parent: sentry_repository
+  sentry_dashboardpermissionsteam:
+    store: default
+    primary_key:
+    - id
+    refs:
+      team_id:
+        parent: sentry_team
+  sentry_teamavatar:
+    store: default
+    primary_key:
+    - id
+    refs:
+      team_id:
+        parent: sentry_team
+  workflow_engine_datacondition:
+    store: default
+    primary_key:
+    - id
+    refs:
+      condition_group_id:
+        parent: workflow_engine_dataconditiongroup
+  workflow_engine_dataconditiongroupaction:
+    store: default
+    primary_key:
+    - id
+    refs:
+      condition_group_id:
+        parent: workflow_engine_dataconditiongroup
+  workflow_engine_workflowdataconditiongroup:
+    store: default
+    primary_key:
+    - id
+    refs:
+      condition_group_id:
+        parent: workflow_engine_dataconditiongroup
+  workflow_engine_datasourcedetector:
+    store: default
+    primary_key:
+    - id
+    refs:
+      data_source_id:
+        parent: workflow_engine_datasource
+  workflow_engine_detectorworkflow:
+    store: default
+    primary_key:
+    - id
+    refs:
+      workflow_id:
+        parent: workflow_engine_workflow
+  workflow_engine_workflowactiongroupstatus:
+    store: default
+    primary_key:
+    - id
+    refs:
+      workflow_id:
+        parent: workflow_engine_workflow
+  workflow_engine_workflowfirehistory:
+    store: default
+    primary_key:
+    - id
+    refs:
+      workflow_id:
+        parent: workflow_engine_workflow
+  sentry_monitorenvbrokendetection:
+    store: crons
+    primary_key:
+    - id
+    refs:
+      monitor_incident_id:
+        parent: sentry_monitorincident
+  workflow_engine_dataconditionalertruletrigger:
+    store: default
+    primary_key:
+    - id
+    refs:
+      alert_rule_trigger_id:
+        parent: sentry_alertruletrigger
+  sentry_installablepreprodartifact:
+    store: default
+    primary_key:
+    - id
+    refs:
+      preprod_artifact_id:
+        parent: sentry_preprodartifact
+  sentry_preprodartifactmobileappinfo:
+    store: default
+    primary_key:
+    - id
+    refs:
+      preprod_artifact_id:
+        parent: sentry_preprodartifact
+  sentry_preprodartifactsizemetrics:
+    store: default
+    primary_key:
+    - id
+    refs:
+      preprod_artifact_id:
+        parent: sentry_preprodartifact
+  sentry_preprodcomparisonapproval:
+    store: default
+    primary_key:
+    - id
+    refs:
+      preprod_artifact_id:
+        parent: sentry_preprodartifact
+  sentry_preprodsnapshotmetrics:
+    store: default
+    primary_key:
+    - id
+    refs:
+      preprod_artifact_id:
+        parent: sentry_preprodartifact
+  sentry_dashboardwidgetquery:
+    store: default
+    primary_key:
+    - id
+    refs:
+      widget_id:
+        parent: sentry_dashboardwidget
+  sentry_ruleactivity:
+    store: default
+    primary_key:
+    - id
+    refs:
+      rule_id:
+        parent: sentry_rule
+  sentry_snubaqueryeventtype:
+    store: default
+    primary_key:
+    - id
+    refs:
+      snuba_query_id:
+        parent: sentry_snubaquery
+  sentry_notificationmessage:
+    store: default
+    primary_key:
+    - id
+    refs:
+      group_id:
+        parent: sentry_groupedmessage
+  sentry_groupderiveddata:
+    store: default
+    primary_key:
+    - id
+    refs:
+      group_id:
+        parent: sentry_groupedmessage
+  sentry_groupmeta:
+    store: default
+    primary_key:
+    - id
+    refs:
+      group_id:
+        parent: sentry_groupedmessage
+  sentry_groupsnooze:
+    store: default
+    primary_key:
+    - id
+    refs:
+      group_id:
+        parent: sentry_groupedmessage
+  workflow_engine_detectorgroup:
+    store: default
+    primary_key:
+    - id
+    refs:
+      group_id:
+        parent: sentry_groupedmessage
+  sentry_grouphashmetadata:
+    store: default
+    primary_key:
+    - id
+    refs:
+      grouphash_id:
+        parent: sentry_grouphash
+  sentry_groupopenperiodactivity:
+    store: default
+    primary_key:
+    - id
+    refs:
+      group_open_period_id:
+        parent: sentry_groupopenperiod
+  seer_projectrepository:
+    store: default
+    primary_key:
+    - id
+    refs:
+      project_repository_id:
+        parent: sentry_projectrepository
+  workflow_engine_detectorstate:
+    store: default
+    primary_key:
+    - id
+    refs:
+      detector_id:
+        parent: workflow_engine_detector
+  sentry_preprodsnapshotcomparison:
+    store: default
+    primary_key:
+    - id
+    refs:
+      base_snapshot_metrics_id:
+        parent: sentry_preprodsnapshotmetrics
+  sentry_dashboardwidgetqueryondemand:
+    store: default
+    primary_key:
+    - id
+    refs:
+      dashboard_widget_query_id:
+        parent: sentry_dashboardwidgetquery
+  seer_projectrepositorybranchoverride:
+    store: default
+    primary_key:
+    - id
+    refs:
+      seer_project_repository_id:
+        parent: seer_projectrepository

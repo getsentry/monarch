@@ -11,7 +11,7 @@ stores:
   attachments: { type: postgres }
   # no reclaimer exists in Sentry, we should delete the object when the row is removed
   # (in objectstore's attachments in production a retention TTL also exists as a backstop)
-  attachment_blobs: { type: blob_store, eviction: delete }
+  objectstore: { type: blob_store, eviction: delete }
   files:       { type: postgres }
   # filestore is not org/project scoped so it is not safe to delete blobs referenced by
   # a specific project. Sentry's delete_unreferenced_blobs() / cleanup_unused_files()
@@ -25,21 +25,25 @@ stores:
 relationships:
   organization:
     store: default
+    primary_key: [id]
 
   project:
     store: default
+    primary_key: [id]
     static: true
     refs:
       organization_id: { parent: organization }
 
   group:
     store: default
+    primary_key: [id]
     refs:
       project_id: { parent: project }
 
   # Org and project columns exist here but are nullable, group_id is always present
   groupinbox:
     store: default
+    primary_key: [id]
     refs:
       organization_id: { parent: organization, nullable: true }
       project_id:      { parent: project, nullable: true }
@@ -47,26 +51,30 @@ relationships:
 
   promptsactivity:
     store: default
+    primary_key: [id]
     refs:
       organization_id: { parent: organization }
       project_id:      { parent: project }
 
   eventattachment:
     store: attachments
+    primary_key: [id]
     refs:
       project_id: { parent: project }
       group_id:   { parent: group, nullable: true }
-      blob_path:  { blob: attachment_blobs }
+      blob_path:  { blob: objectstore }
 
   # Carries both group and project
   groupassignee:
     store: default
+    primary_key: [id]
     refs:
       group_id:   { parent: group }
       project_id: { parent: project }
 
   grouprelease:
     store: default
+    primary_key: [id]
     refs:
       group_id:   { parent: group }
       project_id: { parent: project }
@@ -74,6 +82,7 @@ relationships:
   # project_id is stable as group_id can be null or changed on merge/unmerge
   grouphash:
     store: default
+    primary_key: [id]
     refs:
       project_id: { parent: project }
       group_id:   { parent: group, nullable: true }
@@ -81,35 +90,41 @@ relationships:
   # implicit foreign key without actual DB constraint, but we handle it all the same
   commit:
     store: default
+    primary_key: [id]
     refs:
       organization_id: { parent: organization }
 
   # these are HybridCloudForeignKey in Sentry, it's just a regular reference to us
   apikey:
     store: default
+    primary_key: [id]
     refs:
       organization_id: { parent: organization }
 
   orgauthtoken:
     store: default
+    primary_key: [id]
     refs:
       organization_id: { parent: organization }
 
   # Org ID is nullable, check if it's reliable otherwise scope by group_id instead
   groupredirect:
     store: default
+    primary_key: [id]
     refs:
       organization_id: { parent: organization, nullable: true }
       group_id:        { parent: group }
 
   release:
     store: default
+    primary_key: [id]
     refs:
       organization_id: { parent: organization }
 
   # many to many relationship, we can go through release or project
   releaseproject:
     store: default
+    primary_key: [id]
     refs:
       release_id: { parent: release }
       project_id: { parent: project }
@@ -117,6 +132,7 @@ relationships:
   # files table that references an external blob storage
   file:
     store: files
+    primary_key: [id]
     refs:
       project_id: { parent: project }
       path:       { blob: filestore }

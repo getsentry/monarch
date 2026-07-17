@@ -112,12 +112,13 @@ def read_orgs(graph: Graph, cells: dict[str, Cell]) -> dict:
     can't be reached just lists nothing; post-cutover an org honestly appears in both
     cells until eviction removes the frozen source copy."""
     store = graph.store_of[graph.root]
+    root_key = graph.primary_key_of[graph.root][0]
     orgs = []
     for cell in cells.values():
         try:
             with psycopg.connect(cell.dsn_for(store), autocommit=True) as conn:
                 rows = conn.execute(
-                    f'SELECT id, name FROM "{graph.root}" ORDER BY id'
+                    f'SELECT {root_key}, name FROM "{graph.root}" ORDER BY {root_key}'
                 ).fetchall()
         except psycopg.OperationalError:
             continue

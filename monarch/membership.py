@@ -18,6 +18,8 @@ that carried it."""
 
 from psycopg import Connection
 
+# Scoping tables only (root + parents). config.validate pins them to single-column keys;
+# the int is a standing assumption -- every scoping table in sentry and seer has an int key.
 Membership = dict[str, set[int]]
 
 

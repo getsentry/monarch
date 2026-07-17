@@ -169,7 +169,8 @@ def apply_message(
             continue
         if isinstance(item, Change):
             if item.table in graph.frozen and item.op != "UPDATE":
-                fail_on_frozen_change(st, item)  # scope is static only because of the freeze
+                # scope is static only because of the freeze
+                fail_on_frozen_change(st, item, graph.primary_key_of[item.table])
             st.pending.append(item)
             continue
         if isinstance(item, Truncate):
@@ -186,7 +187,7 @@ def apply_message(
                         for column, store in graph.blobs.get(change.table, {}).items():
                             if (key := change.get(column)) is not None:
                                 blob_members[store].add(key)
-                        apply_change(conn, change)
+                        apply_change(conn, change, graph.primary_key_of[change.table])
             st.pending.clear()
         st.cursor.send_feedback(flush_lsn=msg.data_start)
         st.applied_lsn = msg.data_start
@@ -221,8 +222,9 @@ def fail_on_truncate(st: _Stream, truncate: Truncate) -> NoReturn:
     raise RuntimeError(f"{note}; move #{st.unit.move.id} {outcome}")
 
 
-def fail_on_frozen_change(st: _Stream, change: Change) -> NoReturn:
-    note = f'{change.op} on frozen "{change.table}" (id={change.get_int("id")}) mid-move'
+def fail_on_frozen_change(st: _Stream, change: Change, primary_key: list[str]) -> NoReturn:
+    key = ", ".join(f"{k}={change.get(k)}" for k in primary_key)
+    note = f'{change.op} on frozen "{change.table}" ({key}) mid-move'
     st.unit.add_event(f"fatal: {note}")
     moved = st.unit.move.transition(Phase.FAILED, note=f"{st.store}: {note}")
     outcome = "marked failed" if moved else "left in existing phase"
@@ -261,22 +263,25 @@ class TailFilter:
         """The change if in scope, else None. A dynamic parent is same-store
         (config.validate), so its own change passed through this stream first -- membership
         is stream-local and a miss means out of scope, never in flight."""
+        graph = self.graph
         membership = self.membership
-        row_id = change.get_int("id")
-        if row_id is None:  # no key -> can't identify the row
+        key = graph.primary_key_of[change.table]
+        if any(change.get(k) is None for k in key):  # no key -> can't identify the row
             return None
-        if change.table == self.graph.root:
-            in_scope = row_id in membership.get(self.graph.root, set())
+        # get_int only where membership applies: scoping tables (root + parents) have
+        # single-column int keys (config.validate); a leaf's key may be composite or text.
+        if change.table == graph.root:
+            in_scope = change.get_int(key[0]) in membership.get(graph.root, set())
         elif change.op == "DELETE":
             # A delete carries only the key. Parent tables scope through membership; a leaf delete
             # is applied blind, letting the sink scope it: the sink holds only in-scope rows for
             # this id space (staged sink, no other tenants), so the delete hits our row or matches
             # nothing. Scoping at the source instead would need REPLICA IDENTITY FULL on leaves.
             in_scope = (
-                change.table not in self.graph.parents
-                or row_id in membership.get(change.table, set())
+                change.table not in graph.parents
+                or change.get_int(key[0]) in membership.get(change.table, set())
             )
-        elif (edge := self.graph.scope_edge(change.table)) is not None:
+        elif (edge := graph.scope_edge(change.table)) is not None:
             value = change.get_int(edge.column)
             if value is None:
                 return None
@@ -285,8 +290,10 @@ class TailFilter:
             in_scope = False
         if not in_scope:
             return None
-        if change.table in self.graph.parents and change.table not in self.graph.frozen:
+        if change.table in graph.parents and change.table not in graph.frozen:
             members = membership.setdefault(change.table, set())
+            row_id = change.get_int(key[0])
+            assert row_id is not None  # every key column is present: guarded on entry
             if change.op == "DELETE":
                 members.discard(row_id)
             else:
@@ -301,13 +308,20 @@ def cast_to(type_name: str) -> sql.SQL:
     return sql.SQL(type_name)  # pyright: ignore[reportArgumentType]
 
 
-def apply_change(sink: Connection, change: Change) -> None:
-    """Execute one in-scope change on the sink."""
-    row_id = change.get_int("id")
+def apply_change(sink: Connection, change: Change, primary_key: list[str]) -> None:
+    """Execute one in-scope change on the sink. The key columns are always present in
+    change.cols: _admit drops unidentifiable changes before they reach here."""
     table = sql.Identifier(change.table)
+    key_cols = [c for c in change.cols if c.name in primary_key]
+    key_desc = ", ".join(f"{c.name}={c.value}" for c in key_cols)
+    where = sql.SQL(" AND ").join(
+        sql.SQL("{} = %s::text::{}").format(sql.Identifier(c.name), cast_to(c.type_name))
+        for c in key_cols
+    )
+    key_params = [c.value for c in key_cols]
     if change.op == "DELETE":
-        delete = sql.SQL("DELETE FROM {} WHERE id = %s").format(table)
-        if sink.execute(delete, (row_id,)).rowcount == 0:
+        delete = sql.SQL("DELETE FROM {} WHERE {}").format(table, where)
+        if sink.execute(delete, key_params).rowcount == 0:
             return  # already gone: matched nothing, don't log it
     elif change.partial:
         # Unchanged TOAST columns were omitted: cols is not the full row, so the upsert's
@@ -315,18 +329,18 @@ def apply_change(sink: Connection, change: Change) -> None:
         # integrity error -- the exported-snapshot seam plus ack-after-apply guarantee the
         # sink already holds the full row. (NOT true for a chunked snapshot, where snapshot
         # and stream interleave: this guard does not port to that design.)
-        data = [c for c in change.cols if c.name != "id"]
+        data = [c for c in change.cols if c.name not in primary_key]
         if not data:
             return  # only unchanged columns: nothing to apply
         updates = sql.SQL(", ").join(
             sql.SQL("{} = %s::text::{}").format(sql.Identifier(c.name), cast_to(c.type_name))
             for c in data
         )
-        update = sql.SQL("UPDATE {} SET {} WHERE id = %s").format(table, updates)
-        if sink.execute(update, [c.value for c in data] + [row_id]).rowcount == 0:
+        update = sql.SQL("UPDATE {} SET {} WHERE {}").format(table, updates, where)
+        if sink.execute(update, [c.value for c in data] + key_params).rowcount == 0:
             raise RuntimeError(
-                f"partial {change.table} change for id={row_id} but the sink has no row --"
-                " refusing to fabricate a row missing its TOAST columns"
+                f"partial {change.table} change for {key_desc} but the sink has no"
+                " row -- refusing to fabricate a row missing its TOAST columns"
             )
     else:
         names = sql.SQL(", ").join(sql.Identifier(c.name) for c in change.cols)
@@ -336,15 +350,16 @@ def apply_change(sink: Connection, change: Change) -> None:
         updates = sql.SQL(", ").join(
             sql.SQL("{} = EXCLUDED.{}").format(sql.Identifier(c.name), sql.Identifier(c.name))
             for c in change.cols
-            if c.name != "id"
+            if c.name not in primary_key
         )
         action = (
             sql.SQL("UPDATE SET {}").format(updates)
-            if len(change.cols) > 1
+            if len(change.cols) > len(primary_key)
             else sql.SQL("NOTHING")
         )
-        insert = sql.SQL("INSERT INTO {} ({}) VALUES ({}) ON CONFLICT (id) DO {}").format(
-            table, names, values, action
+        conflict = sql.SQL(", ").join(sql.Identifier(k) for k in primary_key)
+        insert = sql.SQL("INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO {}").format(
+            table, names, values, conflict, action
         )
         sink.execute(insert, [c.value for c in change.cols])
-    print(f"  {change.op:<6} {change.table:<16} id={row_id}  ->  sink")
+    print(f"  {change.op:<6} {change.table:<16} {key_desc}  ->  sink")

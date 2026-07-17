@@ -40,8 +40,11 @@ def run_evict(
             if (scope := scope_predicate(graph, table, keys, root_id)) is None:
                 continue
             _, pred = scope
-            select = sql.SQL("SELECT id FROM {} WHERE {}").format(sql.Identifier(table), pred)
-            keys[table] = [r[0] for r in conn_for[table].execute(select).fetchall()]
+            if table in graph.parents:
+                select = sql.SQL("SELECT {} FROM {} WHERE {}").format(
+                    sql.Identifier(graph.primary_key_of[table][0]), sql.Identifier(table), pred
+                )
+                keys[table] = [r[0] for r in conn_for[table].execute(select).fetchall()]
             scoped.append((table, pred))
 
         # Objects before rows: a delete-on-eviction store's keys are only recoverable while the

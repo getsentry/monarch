@@ -119,7 +119,7 @@ def attach(conns: Conns, blobs: dict, org: int, n: int) -> str:
     """Exclusive-store blob under the row's project scope, keyed like the seed's."""
     contents = f"traffic attachment #{n} for org {org}\n"
     key = f"project={org}/eventattachment-t{n}"
-    write_blob(blobs["attachment_blobs"], key, contents)
+    write_blob(blobs["objectstore"], key, contents)
     row = conns["attachments"].execute(
         "INSERT INTO eventattachment (project_id, group_id, blob_path)"
         " VALUES (%s, NULL, %s) RETURNING id",

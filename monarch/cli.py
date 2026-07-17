@@ -14,7 +14,7 @@ from .membership import BlobMembership
 from .snapshot import Source, derive_membership, estimate_rows, run_snapshot
 from .stream import StreamSource, run_streams
 
-CONFIG = "manifest.yaml"
+CONFIG = "manifest.generated.yaml"
 FLEET = "fleet.yaml"
 
 
@@ -49,8 +49,9 @@ def read_frozen_ids(
         if edge is None or edge.parent != graph.root:
             continue
         conn = conns[source.dsn_for(graph.store_of[table])]
+        key = graph.primary_key_of[table][0]  # frozen tables are parents: single-key
         rows = conn.execute(
-            f'SELECT id FROM "{table}" WHERE {edge.column} = %s', (org_id,)
+            f'SELECT {key} FROM "{table}" WHERE {edge.column} = %s', (org_id,)
         ).fetchall()
         out[table] = [r[0] for r in rows]
     return out

@@ -42,6 +42,7 @@ class Graph:
     root: str
     stores: dict[str, Store]
     store_of: dict[str, str]  # table -> logical store name
+    primary_key_of: dict[str, list[str]]  # table -> primary key columns (composite allowed)
     edges: dict[str, list[Edge]]  # table -> parent edges
     blobs: dict[str, dict[str, str]]  # table -> blob column -> blob store name
     frozen: frozenset[str]  # tables whose id sets are assumed static during a move (manifest: `static`)
@@ -104,6 +105,15 @@ class Graph:
                     f"{table}: scope edge {edge.column} crosses stores to unfrozen"
                     f" {edge.parent!r} -- colocate them or freeze the parent"
                 )
+        # Scoping tables (the root and every referenced parent) are addressed by membership
+        # sets and IN-list predicates: single-column keys only. A leaf's key may be composite
+        # -- it is only ever a row identity for apply.
+        for table in {self.root, *self.parents}:
+            if len(self.primary_key_of[table]) != 1:
+                raise ValueError(
+                    f"{table}: scoping tables need a single-column primary key,"
+                    f" got {self.primary_key_of[table]}"
+                )
 
 
 def load_graph(path: str) -> Graph:
@@ -123,11 +133,13 @@ def load_graph(path: str) -> Graph:
             case unknown:
                 raise ValueError(f"store {name}: unknown type {unknown!r}")
     store_of: dict[str, str] = {}
+    primary_key_of: dict[str, list[str]] = {}
     edges: dict[str, list[Edge]] = {}
     blobs: dict[str, dict[str, str]] = {}
     frozen: set[str] = set()
     for table, spec in raw["relationships"].items():
         store_of[table] = spec["store"]
+        primary_key_of[table] = spec["primary_key"]
         if spec.get("static"):
             frozen.add(table)
         for column, ref in spec.get("refs", {}).items():
@@ -141,6 +153,7 @@ def load_graph(path: str) -> Graph:
         root=raw["root"],
         stores=stores,
         store_of=store_of,
+        primary_key_of=primary_key_of,
         edges=edges,
         blobs=blobs,
         frozen=frozenset(frozen),
