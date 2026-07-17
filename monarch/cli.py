@@ -1,64 +1,19 @@
 import argparse
 import sys
-from collections.abc import Callable
 from contextlib import ExitStack, closing
-from functools import partial
 
 import psycopg
 
-from . import dashboard, move, slot
-from .blobs import Bucket, copy_blob
-from .config import BlobStore, Cell, Graph, list_units, load_config
-from .utils import trust_sql
+from . import dashboard, move, slot, worker
+from .blobs import Bucket, blob_copiers
+from .config import BlobStore, Cell, Graph, connect, list_units, load_config
 from .cell_eviction import run_evict
 from .membership import BlobMembership
-from .snapshot import Source, derive_membership, estimate_rows, run_snapshot
+from .snapshot import Source, derive_membership, estimate_rows, read_frozen_ids, run_snapshot
 from .stream import StreamSource, run_streams
 
-CONFIG = "manifest.generated.yaml"
+CONFIG = "manifest.yaml"
 FLEET = "fleet.yaml"
-
-
-def connect(dsn: str) -> psycopg.Connection:
-    return psycopg.connect(dsn, autocommit=True)
-
-
-def slot_name(org_id: int, store: str) -> str:
-    # slots are database-scoped objects, but named per store -- the mover unit; colocated
-    # stores hold separate slots (each decoding the shared WAL) on their shared database
-    return f"monarch_org_{org_id}_{store}"
-
-
-def blob_copiers(graph: Graph, source: Cell, sink: Cell) -> dict[str, Callable[[str], bool]]:
-    """Blob store name -> copy(key) from the source cell's bucket to the sink cell's."""
-    return {
-        name: partial(
-            copy_blob,
-            Bucket(source.blobs[name]["file_path"]),
-            Bucket(sink.blobs[name]["file_path"]),
-        )
-        for name, store in graph.stores.items()
-        if isinstance(store, BlobStore)
-    }
-
-
-def read_frozen_ids(
-    graph: Graph, source: Cell, conns: dict[str, psycopg.Connection], org_id: int
-) -> dict[str, list[int]]:
-    """Each frozen table's ids for the org, read before slot creation: the freeze makes a
-    pre-slot read equal the snapshot's view, which is what makes IN-list row filters sound."""
-    out: dict[str, list[int]] = {}
-    for table in graph.frozen:
-        edge = graph.publication_edge(table)
-        if edge is None or edge.parent != graph.root:
-            continue
-        conn = conns[source.dsn_for(graph.store_of[table])]
-        key = graph.primary_key_of[table][0]  # frozen tables are parents: single-key
-        rows = conn.execute(
-            trust_sql(f'SELECT {key} FROM "{table}" WHERE {edge.column} = %s'), (org_id,)
-        ).fetchall()
-        out[table] = [r[0] for r in rows]
-    return out
 
 
 def cmd_create_publication(org_id: int, graph: Graph, source: Cell, ledger_dsn: str) -> None:
@@ -157,7 +112,7 @@ def cmd_snapshot(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: 
             with slot.nudge_running_xacts(primary_dsns):
                 for db in source.databases:
                     for store in db.stores:
-                        name = slot_name(org_id, store)
+                        name = slot.slot_name(org_id, store)
                         lsn, snapshot = stack.enter_context(slot.create_slot(db.decode_dsn, name))
                         print(f"slot {name} created at LSN {lsn} (snapshot {snapshot})")
                         unit = move.MoveUnit(m, store)
@@ -175,10 +130,10 @@ def cmd_snapshot(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: 
             for name in blob_names:
                 move.MoveUnit(m, name).transition(move.UnitStatus.COPYING, note="recording keys")
             print()
-            membership = run_snapshot(sources, sinks, sink, graph, org_id, blob_members)
+            _, copied = run_snapshot(sources, sinks, sink, graph, org_id, blob_members)
             for db in source.databases:
                 for store in db.stores:
-                    rows = sum(len(membership.get(t, ())) for t in graph.store_tables(store))
+                    rows = sum(copied.get(t, 0) for t in graph.store_tables(store))
                     unit = move.MoveUnit(m, store)
                     unit.record_copy_total(rows)
                     unit.transition(move.UnitStatus.COPIED, note=f"{rows} rows")
@@ -224,7 +179,7 @@ def cmd_stream(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: st
                 conn = stack.enter_context(connect(db.decode_dsn))
                 repl = stack.enter_context(closing(slot.connect_replication(db.decode_dsn)))
                 pubs = ",".join(slot.publication_names(org_id, store))
-                sources.append(StreamSource(store, conn, repl, slot_name(org_id, store), pubs))
+                sources.append(StreamSource(store, conn, repl, slot.slot_name(org_id, store), pubs))
         try:
             run_streams(
                 sources,
@@ -251,12 +206,12 @@ def cmd_evict(org_id: int, graph: Graph, cell: Cell, ledger_dsn: str, move_id: i
     for db in cell.databases:
         with connect(db.decode_dsn) as decode:
             for store in db.stores:
+                name = slot.slot_name(org_id, store)
                 live = decode.execute(
-                    "SELECT 1 FROM pg_replication_slots WHERE slot_name = %s",
-                    (slot_name(org_id, store),),
+                    "SELECT 1 FROM pg_replication_slots WHERE slot_name = %s", (name,)
                 ).fetchone()
                 if live:
-                    sys.exit(f"slot {slot_name(org_id, store)} still exists -- run drop-slot first")
+                    sys.exit(f"slot {name} still exists -- run drop-slot first")
     with ExitStack() as stack:
         conns = {
             db.primary_dsn: stack.enter_context(connect(db.primary_dsn)) for db in cell.databases
@@ -299,6 +254,10 @@ def main() -> None:
         p = sub.add_parser(cmd, help=doc)
         p.add_argument("--org-id", type=int, required=True)
     p = sub.add_parser(
+        "worker", help="Run one store's mover: it picks up the live move and drives its store"
+    )
+    p.add_argument("--store", required=True, help="the postgres store this worker owns")
+    p = sub.add_parser(
         "evict", help="Delete the org's rows from a cell: source after cutover, sink to abort"
     )
     p.add_argument("--org-id", type=int, required=True)
@@ -306,7 +265,7 @@ def main() -> None:
     p.add_argument(
         "--move-id", type=int, required=True, help="move to journal the eviction against"
     )
-    p = sub.add_parser("dashboard", help="Serve the demo dashboard (reads only the ledger)")
+    p = sub.add_parser("dashboard", help="Serve the demo dashboard")
     p.add_argument("--port", type=int, default=8008)
     args = parser.parse_args()
 
@@ -323,12 +282,17 @@ def main() -> None:
                 cmd_stream(args.org_id, graph, cells, ledger_dsn)
             except KeyboardInterrupt:
                 pass
+        case "worker":
+            try:
+                worker.run_worker(args.store, graph, cells, ledger_dsn)
+            except KeyboardInterrupt:
+                pass
         case "drop-slot":
             for db in cells[args.source].databases:
                 with connect(db.decode_dsn) as conn:
                     for store in db.stores:
-                        slot.drop_replication_slot(conn, slot_name(args.org_id, store))
-                        print(f"slot {slot_name(args.org_id, store)} dropped")
+                        slot.drop_replication_slot(conn, slot.slot_name(args.org_id, store))
+                        print(f"slot {slot.slot_name(args.org_id, store)} dropped")
         case "drop-publication":
             for db in cells[args.source].databases:
                 with connect(db.primary_dsn) as admin:

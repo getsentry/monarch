@@ -92,7 +92,13 @@ def run_streams(
     the org is idle while the cell is busy.
     Buffering is per source transaction: a huge one (bulk update over in-scope rows) buffers in
     memory until its Commit -- fine at prototype scale; pgoutput proto v2 streams these."""
-    sink_for = {t: sinks[db.primary_dsn] for db in sink.databases for t in db.tables(graph)}
+    streamed_tables = {t for s in sources for t in graph.store_tables(s.store)}
+    sink_for = {
+        t: sinks[db.primary_dsn]
+        for db in sink.databases
+        for t in db.tables(graph)
+        if t in streamed_tables
+    }
     streams = []
     for s in sources:
         cur = s.repl.cursor()

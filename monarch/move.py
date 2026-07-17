@@ -96,6 +96,15 @@ class Move:
         assert row is not None
         return row[0], row[1]
 
+    def root_id(self) -> int:
+        """The org being moved -- fixed at create(); a store worker reads it from the live
+        move rather than being launched pinned to one org."""
+        row = self.conn.execute(
+            "SELECT root_id FROM move WHERE id = %s", (self.id,)
+        ).fetchone()
+        assert row is not None
+        return row[0]
+
     def transition(self, to: Phase, note: str | None = None) -> bool:
         """Guarded update of the org-level phase (coordinator only): writes only if the
         move is in a phase the map allows `to` from. False = it wasn't (someone else moved
@@ -229,5 +238,14 @@ def find_active(conn: Connection, root_id: int) -> Move | None:
     row = conn.execute(
         "SELECT id FROM move WHERE root_id = %s AND phase NOT IN ('finalized', 'aborted')",
         (root_id,),
+    ).fetchone()
+    return Move(conn, row[0]) if row else None
+
+
+def find_live(conn: Connection) -> Move | None:
+    """The one live move fleet-wide, if any (one_active_move guarantees at most one) -- how a
+    store worker locates its move without being told which org."""
+    row = conn.execute(
+        "SELECT id FROM move WHERE phase NOT IN ('finalized', 'aborted') LIMIT 1"
     ).fetchone()
     return Move(conn, row[0]) if row else None

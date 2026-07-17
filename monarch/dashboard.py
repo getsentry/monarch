@@ -11,7 +11,6 @@ abort is the phase compare-and-swap that kills one -- the never-touches-a-cell r
 survives both."""
 
 import json
-import signal
 import subprocess
 import sys
 from datetime import datetime
@@ -191,10 +190,8 @@ class Handler(BaseHTTPRequestHandler):
             body = None
         if path == "/register":
             self._register(body)
-        elif path == "/create-publications":
-            self._spawn_step(body, "create-publication")
         elif path == "/snapshot":
-            self._spawn_step(body, "snapshot")
+            self._transition(body, move.UnitStatus.COPYING, "snapshot requested")
         elif path == "/stream":
             self._spawn_step(body, "stream")
         elif path == "/stop-stream":
@@ -251,15 +248,37 @@ class Handler(BaseHTTPRequestHandler):
                 ),
             )
             return
-        _stream_proc.send_signal(signal.SIGINT)
+        # SIGTERM, not SIGINT: `make run` backgrounds the dashboard, so it and the cmd_stream
+        # it spawns inherit SIG_IGN for SIGINT and would ignore it. cmd_stream dies abruptly
+        # (no clean journal line), but the slot persists server-side and PG frees it when the
+        # connection drops. Goes away once streaming becomes a worker reaction.
+        _stream_proc.terminate()
         try:
             _stream_proc.wait(timeout=10)  # usually sub-second; polls just queue behind it
         except subprocess.TimeoutExpired:
             self._respond(
-                202, "application/json", _to_json({"error": "SIGINT sent but exit unconfirmed"})
+                202, "application/json", _to_json({"error": "SIGTERM sent but exit unconfirmed"})
             )
             return
         self._respond(200, "application/json", _to_json({"stopped": _stream_proc.pid}))
+
+    def _transition(self, body, target: "move.Phase | move.UnitStatus", note: str) -> None:
+        """The dashboard's whole write side: CAS the requested state into the ledger and let
+        the workers respond. A Phase advances the move; a UnitStatus advances every postgres
+        store's unit to it -- the trigger each worker polls for. `note` is the journal line
+        the transition records, so the feed reads as the operator's intent."""
+        m = move.Move(self.conn, int(body["move"]))
+        if isinstance(target, move.Phase):
+            moved = m.transition(target, note=note)
+        else:
+            source = self.cells[m.cells()[0]]
+            moved = [
+                store
+                for db in source.databases
+                for store in db.stores
+                if move.MoveUnit(m, store).transition(target, note=note)
+            ]
+        self._respond(200, "application/json", _to_json({"target": target, "moved": moved}))
 
     def _cutover(self, body) -> None:
         """Demo drain + cut-over: movers must have streamed and be stopped, then two phase
@@ -424,8 +443,6 @@ class Handler(BaseHTTPRequestHandler):
             self._respond(409, "application/json", _to_json({"error": "needs an active move"}))
             return
         args = [sys.executable, "-m", "monarch.cli", command, "--org-id", str(row[0])]
-        if command == "create-publication":  # snapshot's route comes from the move row
-            args += ["--from", row[1]]
         proc = subprocess.Popen(args)
         if command == "stream":
             global _stream_proc

@@ -21,6 +21,12 @@ from .config import Graph
 from .utils import trust_sql
 
 
+def slot_name(org_id: int, store: str) -> str:
+    # slots are database-scoped objects, but named per store -- the mover unit; colocated
+    # stores hold separate slots (each decoding the shared WAL) on their shared database
+    return f"monarch_org_{org_id}_{store}"
+
+
 def publication_names(org_id: int, store: str) -> list[str]:
     """The store's publication pair (per-org per-store: the store is the mover unit, so
     each store's slot subscribes only to its own tables -- colocated stores get separate

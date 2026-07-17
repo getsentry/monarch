@@ -19,6 +19,26 @@ class Source:
     snapshot: str  # the slot's exported snapshot name
 
 
+def read_frozen_ids(
+    graph: Graph, source: Cell, conns: dict[str, Connection], org_id: int
+) -> dict[str, list[int]]:
+    """Each frozen table's ids for the org, read before slot creation: the freeze makes a
+    pre-slot read equal the snapshot's view, which is what makes IN-list row filters sound.
+    Also seeds a per-store worker's static spine (run_snapshot's static_keys)."""
+    out: dict[str, list[int]] = {}
+    for table in graph.frozen:
+        edge = graph.publication_edge(table)
+        if edge is None or edge.parent != graph.root:
+            continue
+        conn = conns[source.dsn_for(graph.store_of[table])]
+        key = graph.primary_key_of[table][0]  # frozen tables are parents: single-key
+        rows = conn.execute(
+            trust_sql(f'SELECT {key} FROM "{table}" WHERE {edge.column} = %s'), (org_id,)
+        ).fetchall()
+        out[table] = [r[0] for r in rows]
+    return out
+
+
 def estimate_predicate(
     graph: Graph, table: str, org_id: int, frozen_ids: dict[str, list[int]]
 ) -> str | None:
@@ -150,27 +170,42 @@ def run_snapshot(
     graph: Graph,
     root_id: int,
     blob_members: dict[str, BlobMembership],
-) -> Membership:
-    """Run the snapshot across every store: parents-first scoped queries collecting
+    static_keys: dict[str, list[int]] | None = None,
+) -> tuple[Membership, dict[str, int]]:
+    """Run the snapshot across the passed stores: parents-first scoped queries collecting
     in-scope keys per table -- the keys dict is shared, so a table's predicate can consume
     parent keys read from another store -- then copy each table's rows to its sink database.
+
+    static_keys pre-seeds the keys dict with the static spine (root + static tables) so a
+    single-store call can scope its tables against parents that live in other stores, handed
+    in rather than read during the walk -- sound because those ids are static for the move
+    (config.validate confines cross-store scope edges to them). None when `sources` already
+    spans every store (the CLI's one-shot snapshot), so every parent is present to read
+    directly. Either way the copy is only the org's scoped rows -- static_keys sets how many
+    stores a call spans, never what's in scope.
 
     Each store is read in one REPEATABLE READ transaction pinned to its own slot's
     exported snapshot: consistent per store. The stores' consistent points differ
     slightly (even colocated ones -- separate slots); each store's stream resumes exactly
     at its own, so nothing is missed; cross-store edges stay safe because they bind only
-    the frozen spine. Sink
+    the static spine. Sink
     writes are one transaction per sink database -- atomic per database, not across them
     (that would need 2PC).
 
-    Returns the in-scope keys per table -- the copy totals' source. The streams never
-    consume it: they derive their initial membership from the sink (derive_membership),
-    which holds exactly these rows. Deriving from the *source* instead would silently
-    drop deletes of rows that vanished between snapshot and stream start; the sink keeps
-    such rows until their DELETEs stream through."""
+    Returns (membership, copied): membership is the in-scope parent-table ids, kept for the
+    in-process stream handoff (the CLI streams re-derive from the sink instead -- deriving
+    from the *source* would silently drop deletes of rows that vanished between snapshot and
+    stream start). copied is the actual rows written per table -- the accurate copy total,
+    since leaf tables never appear in membership."""
     print(f"snapshot: scoping org {root_id}\n")
+    my_tables = {t for s in sources for t in graph.store_tables(s.store)}
     source_for = {t: s.conn for s in sources for t in graph.store_tables(s.store)}
-    sink_for = {t: sinks[db.primary_dsn] for db in sink.databases for t in db.tables(graph)}
+    sink_for = {
+        t: sinks[db.primary_dsn]
+        for db in sink.databases
+        for t in db.tables(graph)
+        if t in my_tables
+    }
     for s in sources:
         s.conn.isolation_level = IsolationLevel.REPEATABLE_READ
     with ExitStack() as stack:
@@ -182,9 +217,11 @@ def run_snapshot(
         for conn in sinks.values():
             stack.enter_context(conn.transaction())
 
-        keys: dict[str, list[int]] = {}
+        keys: dict[str, list[int]] = dict(static_keys or {})
         scoped: list[tuple[str, str, sql.Composable]] = []  # (table, scoped_by, pred) in copy order
         for table in graph.topological_sort():
+            if table not in my_tables:  # another store's territory: its own worker copies it
+                continue
             if (scope := scope_predicate(graph, table, keys, root_id)) is None:
                 print(f"  {table:<16} (no rows in scope)")
                 continue
@@ -204,11 +241,13 @@ def run_snapshot(
                 sql.SQL("DELETE FROM {} WHERE {}").format(sql.Identifier(table), pred)
             )
 
+        copied_by_table: dict[str, int] = {}
         for table, scoped_by, pred in scoped:
             blobs = record_scoped_keys(source_for[table], table, pred, graph, blob_members)
             copied = copy_table(source_for[table], sink_for[table], table, pred)
+            copied_by_table[table] = copied
             extra = f" + {blobs} key(s)" if table in graph.blobs else ""
             print(f"  {table:<16} via {scoped_by:<18} {copied} row(s){extra} -> sink")
 
-    # keys already holds only tables something references as a parent
-    return {table: set(ids) for table, ids in keys.items()}
+    # keys holds only parent tables; copied_by_table has the row count for every copied table
+    return {table: set(ids) for table, ids in keys.items()}, copied_by_table

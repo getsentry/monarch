@@ -5,7 +5,7 @@ COMPOSE := docker compose
 PSQL := $(COMPOSE) exec -T postgres psql -U monarch -v ON_ERROR_STOP=1 -q
 SOURCE_PSQL := $(COMPOSE) exec -T primary psql -U monarch -v ON_ERROR_STOP=1 -q
 
-.PHONY: up down install databases schema data reset demo verify snapshot opt-in-group \
+.PHONY: up down install databases schema data reset run demo verify snapshot opt-in-group \
 	traffic evict-source evict-sink psql-source psql-standby psql-files psql-sink \
 	psql-ledger
 
@@ -71,6 +71,19 @@ psql-ledger:
 	$(COMPOSE) exec postgres psql -U monarch -d monarch_ledger
 
 ORG ?= 1
+# Run the whole app at once: the dashboard (coordinator) plus one worker per source postgres
+# store (the movers that respond to the status the dashboard writes). Each worker picks up
+# whatever move is live, so any org registered from the dashboard is handled -- no org is
+# baked in here. `make up schema data` first, then `make run`, then register + snapshot from
+# the dashboard. Ctrl-C stops all of them.
+run:
+	trap 'kill 0' SIGINT; \
+	uv run monarch dashboard & \
+	uv run monarch worker --store default     & \
+	uv run monarch worker --store attachments & \
+	uv run monarch worker --store files       & \
+	wait
+
 # register first: create-publication journals its per-store facts into the registered move,
 # which is what sequences the conductor's snapshot gate (publications only predate the slots)
 snapshot:

@@ -297,23 +297,22 @@ async function pollMoves() {
 // copy timings come from the journal (transitions carry timestamps; unit rows deliberately
 // don't) -- the full feed replays on load, so these are always reconstructible
 const unitTimes = {};
-// journal facts the conductor sequences on: which units have their publications
-const pubsCreated = new Set();
-// and whether the source copy is gone (the move-level event evict journals)
+// whether the source copy is gone (the move-level event evict journals)
 let evicted = false;
-// blob stores are units too but have no publications; pub gates only consider the rest
+// blob stores are units too but hold no slot/publication
 const blobStores = new Set();
-const needsPubs = () => lastUnits.filter(u => !blobStores.has(u.unit));
 
 function snapLine(u) {
   const t = unitTimes[u.unit] ?? {};
   const clock = at => new Date(at).toLocaleTimeString("en-GB");
+  // blob stores record keys, not rows; postgres stores copy rows
+  const noun = blobStores.has(u.unit) ? "keys" : "rows";
   if (u.status === "pending") return "waiting";
   if (u.status === "copying")
     return "copying…"
-      + (u.copy_rows_estimate != null ? ` ~${fmt(u.copy_rows_estimate)} rows expected` : "")
+      + (u.copy_rows_estimate != null ? ` ~${fmt(u.copy_rows_estimate)} ${noun} expected` : "")
       + (t.copying ? ` · started ${clock(t.copying)}` : "");
-  let s = u.copy_rows_total != null ? `✓ ${fmt(u.copy_rows_total)} rows` : "✓ copied";
+  let s = u.copy_rows_total != null ? `✓ ${fmt(u.copy_rows_total)} ${noun}` : "✓ copied";
   if (t.copying && t.copied) s += ` · ${fmtDur(new Date(t.copied) - new Date(t.copying))}`;
   return s;
 }
@@ -364,7 +363,6 @@ function appendEvents(events) {
       else if (e.message.startsWith("-> copied")) t.copied = e.at;
       // old journals ended the copy on "-> streaming"; ??= keeps new moves' earlier mark
       else if (e.message.startsWith("-> streaming")) t.copied ??= e.at;
-      else if (e.message.startsWith("publications created")) pubsCreated.add(e.unit);
     } else if (e.message.startsWith("org evicted")) evicted = true;
     const li = document.createElement("li");
     const t = document.createElement("span"); t.className = "t";
@@ -487,31 +485,18 @@ const ACTIONS = [
     },
     arm: m => m ? "a live move exists — one move at a time"
       : !$("orgpick").value ? "pick an org to move" : null },
-  { label: "create publications",
-    run: async note => {
-      // fire-and-watch: the spawned CLI journals each store's pair; those events arriving
-      // in the feed are the completion signal (and what arms snapshot)
-      const { ok, status, body } = await post("/create-publications", { move: +pinned });
-      if (!ok) { note(body.error ?? `failed (${status}) — restart \`monarch dashboard\`?`); return false; }
-      note("create-publication spawned — the journal confirms each store's _ins/_mut pair");
-      return true;
-    },
-    arm: m => !m || m.phase !== "active" ? "needs an active move"
-      : lastUnits.some(u => u.status !== "pending") ? "slots already exist — too late for new publications"
-      : needsPubs().length && needsPubs().every(u => pubsCreated.has(u.unit))
-        ? "publications already created" : null },
   { label: "run snapshot",
     run: async note => {
       const { ok, status, body } = await post("/snapshot", { move: +pinned });
       if (!ok) { note(body.error ?? `failed (${status}) — restart \`monarch dashboard\`?`); return false; }
-      note("snapshot spawned — slots first (units claim → copying), then the copy; streaming when each store lands");
+      note("snapshot requested — each store's worker creates its publications, copies to the sink, then lands on copied");
       return true;
     },
     arm: m => {
       if (!m) return "register a move first";
       if (m.phase !== "active") return "needs an active move";
       if (lastUnits.some(u => u.status !== "pending")) return "snapshot already ran";
-      return needsPubs().every(u => pubsCreated.has(u.unit)) ? null : "create the publications first";
+      return null;
     } },
   { label: "start stream",
     run: async note => {

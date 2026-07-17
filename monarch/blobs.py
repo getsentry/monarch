@@ -8,7 +8,9 @@ import os
 import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 
+from .config import BlobStore, Cell, Graph
 from .membership import BlobMembership
 
 
@@ -29,6 +31,19 @@ def copy_blob(src: Bucket, dst: Bucket, key: str) -> bool:
     os.makedirs(os.path.dirname(dst.path(key)), exist_ok=True)
     shutil.copyfile(src.path(key), dst.path(key))
     return True
+
+
+def blob_copiers(graph: Graph, source: Cell, sink: Cell) -> dict[str, Callable[[str], bool]]:
+    """Blob store name -> copy(key) from the source cell's bucket to the sink cell's."""
+    return {
+        name: partial(
+            copy_blob,
+            Bucket(source.blobs[name]["file_path"]),
+            Bucket(sink.blobs[name]["file_path"]),
+        )
+        for name, store in graph.stores.items()
+        if isinstance(store, BlobStore)
+    }
 
 
 def copy_pending(members: BlobMembership, copier: Callable[[str], bool], limit: int) -> int:

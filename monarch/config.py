@@ -8,10 +8,17 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import Literal, cast
 
+import psycopg
 import yaml
 from psycopg.conninfo import conninfo_to_dict
 
 Eviction = Literal["delete", "keep"]
+
+
+def connect(dsn: str) -> psycopg.Connection:
+    """An autocommit connection: the ledger and cell reads/writes here manage their own
+    transactions explicitly (move.transition, snapshot's pinned reads)."""
+    return psycopg.connect(dsn, autocommit=True)
 
 
 @dataclass(frozen=True)
