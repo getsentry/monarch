@@ -1,3 +1,4 @@
+import graphlib
 import os
 
 import yaml
@@ -32,17 +33,8 @@ def load_from_config() -> tuple[str, Tables, dict[str, str]]:
 
 def topological_sort(root: str, tables: Tables) -> list[str]:
     """Order tables so a row's FK parents come before it (root first)."""
-    ordered, seen = [root], {root}
-    remaining = [t for t in tables if t != root]
-    while remaining:
-        ready = [
-            t for t in remaining
-            if all(ref["parent"] in seen for ref in tables[t].values() if "parent" in ref)
-        ]
-        if not ready:
-            break  # cycle / missing parent
-        for t in ready:
-            ordered.append(t)
-            seen.add(t)
-            remaining.remove(t)
-    return ordered
+    deps = {
+        t: {ref["parent"] for ref in cols.values() if "parent" in ref}
+        for t, cols in tables.items()
+    }
+    return list(graphlib.TopologicalSorter(deps).static_order())
