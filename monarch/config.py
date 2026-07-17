@@ -65,17 +65,21 @@ class Graph:
         return [t for t in self.topological_sort() if self.store_of[t] == store]
 
     def scope_edge(self, table: str) -> Edge | None:
-        """The edge scoping `table` to a parent: its first parent edge. Every listed edge is
-        trusted -- a null value is taken to mean the row is out of scope -- so one edge fully
+        """The edge scoping `table` to a parent, preferring a static parent (the root or a frozen
+        table): its id set can't change mid-move, so it's the cheapest filter and makes the scope
+        independent of ref order. Falls back to the first parent edge otherwise. Every listed edge
+        is trusted -- a null value is taken to mean the row is out of scope -- so one edge fully
         scopes the table. None for the root or a table with no parent edge. Shared by the
         snapshot's predicates and the stream's row-level admit check."""
-        return next(iter(self.edges.get(table, [])), None)
+        edges = self.edges.get(table, [])
+        static = next((e for e in edges if e.parent == self.root or e.parent in self.frozen), None)
+        return static or next(iter(edges), None)
 
     def publication_edge(self, table: str) -> Edge | None:
         """An edge to a static parent (the root or a frozen table): usable as a publisher-side
-        row filter, since the parent's id set cannot change during the move. Distinct from
-        scope_edge, which may pick a dynamic parent (groupassignee scopes by group_id but
-        filters by project_id)."""
+        row filter, since the parent's id set cannot change during the move. scope_edge prefers
+        the same static edge, so the two usually coincide; they diverge only for a table with no
+        static parent, where scope_edge falls back to a dynamic edge and this returns None."""
         return next(
             (
                 e
