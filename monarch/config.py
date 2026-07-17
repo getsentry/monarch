@@ -32,7 +32,6 @@ Store = PostgresStore | BlobStore
 class Edge:
     column: str
     parent: str
-    nullable: bool
 
 
 @dataclass(frozen=True)
@@ -66,21 +65,22 @@ class Graph:
         return [t for t in self.topological_sort() if self.store_of[t] == store]
 
     def scope_edge(self, table: str) -> Edge | None:
-        """The non-nullable edge scoping `table` to a parent -- such a column is on every row, so
-        one edge fully scopes the table. None for the root or a table with no such edge. Shared
-        by the snapshot's predicates and the stream's row-level admit check."""
-        return next((e for e in self.edges.get(table, []) if not e.nullable), None)
+        """The edge scoping `table` to a parent: its first parent edge. Every listed edge is
+        trusted -- a null value is taken to mean the row is out of scope -- so one edge fully
+        scopes the table. None for the root or a table with no parent edge. Shared by the
+        snapshot's predicates and the stream's row-level admit check."""
+        return next(iter(self.edges.get(table, [])), None)
 
     def publication_edge(self, table: str) -> Edge | None:
-        """A non-nullable edge to a static parent (the root or a frozen table): usable as a
-        publisher-side row filter, since the parent's id set cannot change during the move.
-        Distinct from scope_edge, which may pick a dynamic parent (groupassignee scopes by
-        group_id but filters by project_id)."""
+        """An edge to a static parent (the root or a frozen table): usable as a publisher-side
+        row filter, since the parent's id set cannot change during the move. Distinct from
+        scope_edge, which may pick a dynamic parent (groupassignee scopes by group_id but
+        filters by project_id)."""
         return next(
             (
                 e
                 for e in self.edges.get(table, [])
-                if not e.nullable and (e.parent == self.root or e.parent in self.frozen)
+                if e.parent == self.root or e.parent in self.frozen
             ),
             None,
         )
@@ -144,9 +144,7 @@ def load_graph(path: str) -> Graph:
             frozen.add(table)
         for column, ref in spec.get("refs", {}).items():
             if "parent" in ref:
-                edges.setdefault(table, []).append(
-                    Edge(column, ref["parent"], ref.get("nullable", False))
-                )
+                edges.setdefault(table, []).append(Edge(column, ref["parent"]))
             elif "blob" in ref:
                 blobs.setdefault(table, {})[column] = ref["blob"]
     graph = Graph(

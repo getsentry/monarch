@@ -40,13 +40,13 @@ relationships:
     refs:
       project_id: { parent: project }
 
-  # Org and project columns exist here but are nullable, group_id is always present
+  # Scoped by organization_id; a null value is treated as not belonging to this org.
   groupinbox:
     store: default
     primary_key: [id]
     refs:
-      organization_id: { parent: organization, nullable: true }
-      project_id:      { parent: project, nullable: true }
+      organization_id: { parent: organization }
+      project_id:      { parent: project }
       group_id:        { parent: group }
 
   promptsactivity:
@@ -61,7 +61,7 @@ relationships:
     primary_key: [id]
     refs:
       project_id: { parent: project }
-      group_id:   { parent: group, nullable: true }
+      group_id:   { parent: group }
       blob_path:  { blob: objectstore }
 
   # Carries both group and project
@@ -85,7 +85,7 @@ relationships:
     primary_key: [id]
     refs:
       project_id: { parent: project }
-      group_id:   { parent: group, nullable: true }
+      group_id:   { parent: group }
 
   # implicit foreign key without actual DB constraint, but we handle it all the same
   commit:
@@ -107,12 +107,12 @@ relationships:
     refs:
       organization_id: { parent: organization }
 
-  # Org ID is nullable, check if it's reliable otherwise scope by group_id instead
+  # Scoped by organization_id; a null value is treated as not belonging to this org.
   groupredirect:
     store: default
     primary_key: [id]
     refs:
-      organization_id: { parent: organization, nullable: true }
+      organization_id: { parent: organization }
       group_id:        { parent: group }
 
   release:
