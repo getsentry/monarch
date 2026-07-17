@@ -9,6 +9,7 @@ import psycopg
 from . import dashboard, move, slot
 from .blobs import Bucket, copy_blob
 from .config import BlobStore, Cell, Graph, list_units, load_config
+from .utils import trust_sql
 from .cell_eviction import run_evict
 from .membership import BlobMembership
 from .snapshot import Source, derive_membership, estimate_rows, run_snapshot
@@ -31,8 +32,11 @@ def slot_name(org_id: int, store: str) -> str:
 def blob_copiers(graph: Graph, source: Cell, sink: Cell) -> dict[str, Callable[[str], bool]]:
     """Blob store name -> copy(key) from the source cell's bucket to the sink cell's."""
     return {
-        name: partial(copy_blob, Bucket(source.blobs[name]["file_path"]),
-                      Bucket(sink.blobs[name]["file_path"]))
+        name: partial(
+            copy_blob,
+            Bucket(source.blobs[name]["file_path"]),
+            Bucket(sink.blobs[name]["file_path"]),
+        )
         for name, store in graph.stores.items()
         if isinstance(store, BlobStore)
     }
@@ -51,7 +55,7 @@ def read_frozen_ids(
         conn = conns[source.dsn_for(graph.store_of[table])]
         key = graph.primary_key_of[table][0]  # frozen tables are parents: single-key
         rows = conn.execute(
-            f'SELECT {key} FROM "{table}" WHERE {edge.column} = %s', (org_id,)
+            trust_sql(f'SELECT {key} FROM "{table}" WHERE {edge.column} = %s'), (org_id,)
         ).fetchall()
         out[table] = [r[0] for r in rows]
     return out
@@ -65,7 +69,9 @@ def cmd_create_publication(org_id: int, graph: Graph, source: Cell, ledger_dsn: 
     # journaled per unit -- the fact snapshot's conductor gate sequences on (publication
     # existence itself lives in the cell; the journal records that the step happened).
     with ExitStack() as stack:
-        conns = {db.decode_dsn: stack.enter_context(connect(db.decode_dsn)) for db in source.databases}
+        conns = {
+            db.decode_dsn: stack.enter_context(connect(db.decode_dsn)) for db in source.databases
+        }
         book = stack.enter_context(connect(ledger_dsn))
         m = move.find_active(book, org_id)
         frozen_ids = read_frozen_ids(graph, source, conns, org_id)
@@ -91,7 +97,9 @@ def cmd_create_publication(org_id: int, graph: Graph, source: Cell, ledger_dsn: 
                 print("\n\n".join(statements))
                 if m:
                     names = "/".join(slot.publication_names(org_id, store))
-                    move.MoveUnit(m, store).add_event(f"publications created: {names} on {db.dbname}")
+                    move.MoveUnit(m, store).add_event(
+                        f"publications created: {names} on {db.dbname}"
+                    )
 
 
 def cmd_register(org_id: int, graph: Graph, source: Cell, sink: Cell, ledger_dsn: str) -> None:
@@ -123,8 +131,14 @@ def cmd_snapshot(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: 
             if move.MoveUnit(m, store).status() is not move.UnitStatus.PENDING:
                 sys.exit(f"move #{m.id} already snapshotted ({store} is not pending)")
         try:
-            sinks = {db.primary_dsn: stack.enter_context(connect(db.primary_dsn)) for db in sink.databases}
-            conns = {db.decode_dsn: stack.enter_context(connect(db.decode_dsn)) for db in source.databases}
+            sinks = {
+                db.primary_dsn: stack.enter_context(connect(db.primary_dsn))
+                for db in sink.databases
+            }
+            conns = {
+                db.decode_dsn: stack.enter_context(connect(db.decode_dsn))
+                for db in source.databases
+            }
             frozen_ids = read_frozen_ids(graph, source, conns, org_id)
             # gate, not autocreate: the publications must predate the slots' consistent points
             # (pgoutput resolves them through each transaction's historic catalog snapshot), so
@@ -152,7 +166,9 @@ def cmd_snapshot(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: 
                         # their shared database on separate exported snapshots
                         sconn = stack.enter_context(connect(db.decode_dsn))
                         unit.record_copy_estimate(
-                            estimate_rows(sconn, graph, graph.store_tables(store), org_id, frozen_ids)
+                            estimate_rows(
+                                sconn, graph, graph.store_tables(store), org_id, frozen_ids
+                            )
                         )
                         sources.append(Source(store, sconn, snapshot))
             blob_members = {name: BlobMembership(book, m.id, name) for name in blob_names}
@@ -192,7 +208,9 @@ def cmd_stream(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: st
         blob_names = [name for name, s in graph.stores.items() if isinstance(s, BlobStore)]
         blob_members = {name: BlobMembership(book, m.id, name) for name in blob_names}
         units = {store: move.MoveUnit(m, store) for store in pg_stores + blob_names}
-        sinks = {db.primary_dsn: stack.enter_context(connect(db.primary_dsn)) for db in sink.databases}
+        sinks = {
+            db.primary_dsn: stack.enter_context(connect(db.primary_dsn)) for db in sink.databases
+        }
         membership = derive_membership(sinks, sink, graph, org_id)
         if not membership.get(graph.root):
             sys.exit(f"org {org_id} not in sink {sink_name} -- run `snapshot` first")
@@ -209,8 +227,14 @@ def cmd_stream(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: st
                 sources.append(StreamSource(store, conn, repl, slot_name(org_id, store), pubs))
         try:
             run_streams(
-                sources, sinks, sink, graph, membership,
-                blob_copiers(graph, source, sink), blob_members, units,
+                sources,
+                sinks,
+                sink,
+                graph,
+                membership,
+                blob_copiers(graph, source, sink),
+                blob_members,
+                units,
             )
         except KeyboardInterrupt:
             # a clean stop can announce itself (a crash can't -- staleness covers that);
@@ -234,7 +258,9 @@ def cmd_evict(org_id: int, graph: Graph, cell: Cell, ledger_dsn: str, move_id: i
                 if live:
                     sys.exit(f"slot {slot_name(org_id, store)} still exists -- run drop-slot first")
     with ExitStack() as stack:
-        conns = {db.primary_dsn: stack.enter_context(connect(db.primary_dsn)) for db in cell.databases}
+        conns = {
+            db.primary_dsn: stack.enter_context(connect(db.primary_dsn)) for db in cell.databases
+        }
         buckets = {name: Bucket(loc["file_path"]) for name, loc in cell.blobs.items()}
         run_evict(conns, cell, graph, org_id, buckets)
     # the completion is journaled against the move -- the fact the dashboard's gate watches
@@ -248,7 +274,10 @@ def main() -> None:
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
     for cmd, doc in [
-        ("create-publication", "Create the org's row-filtered publications on the source primaries (before snapshot)"),
+        (
+            "create-publication",
+            "Create the org's row-filtered publications on the source primaries (before snapshot)",
+        ),
         ("drop-publication", "Drop the org's publications (after drop-slot)"),
         ("drop-slot", "Drop the org's replication slots (after cutover, or to abort a move)"),
     ]:
@@ -256,7 +285,8 @@ def main() -> None:
         p.add_argument("--org-id", type=int, required=True)
         p.add_argument("--from", dest="source", default="source", help="source cell in fleet.yaml")
     p = sub.add_parser(
-        "register", help="Register the org's move: move + pending unit rows (takes the one-move lease)"
+        "register",
+        help="Register the org's move: move + pending unit rows (takes the one-move lease)",
     )
     p.add_argument("--org-id", type=int, required=True)
     p.add_argument("--from", dest="source", default="source", help="source cell in fleet.yaml")
@@ -273,8 +303,9 @@ def main() -> None:
     )
     p.add_argument("--org-id", type=int, required=True)
     p.add_argument("--cell", default="source", help="cell to evict the org from (fleet.yaml)")
-    p.add_argument("--move-id", type=int, required=True,
-                   help="move to journal the eviction against")
+    p.add_argument(
+        "--move-id", type=int, required=True, help="move to journal the eviction against"
+    )
     p = sub.add_parser("dashboard", help="Serve the demo dashboard (reads only the ledger)")
     p.add_argument("--port", type=int, default=8008)
     args = parser.parse_args()

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Write one blob into the source cell's filestore and print its content-addressed key.
 Used by `make demo` to stage a real blob behind a file row inserted mid-stream."""
+
 import hashlib
 import sys
 

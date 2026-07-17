@@ -6,7 +6,7 @@ cells colocate several in one database)."""
 import graphlib
 from dataclasses import dataclass
 from functools import cached_property
-from typing import Literal
+from typing import Literal, cast
 
 import yaml
 from psycopg.conninfo import conninfo_to_dict
@@ -44,7 +44,9 @@ class Graph:
     primary_key_of: dict[str, list[str]]  # table -> primary key columns (composite allowed)
     edges: dict[str, list[Edge]]  # table -> parent edges
     blobs: dict[str, dict[str, str]]  # table -> blob column -> blob store name
-    frozen: frozenset[str]  # tables whose id sets are assumed static during a move (manifest: `static`)
+    frozen: frozenset[
+        str
+    ]  # tables whose id sets are assumed static during a move (manifest: `static`)
 
     @cached_property
     def parents(self) -> set[str]:
@@ -166,7 +168,7 @@ def load_graph(path: str) -> Graph:
 
 @dataclass(frozen=True)
 class Database:
-    primary_dsn: str                # always exists; writes and DDL run here
+    primary_dsn: str  # always exists; writes and DDL run here
     stores: list[str]
     standby_dsn: str | None = None  # decode + reads run here when present
 
@@ -176,7 +178,7 @@ class Database:
 
     @property
     def dbname(self) -> str:
-        return conninfo_to_dict(self.primary_dsn)["dbname"]
+        return cast(str, conninfo_to_dict(self.primary_dsn)["dbname"])
 
     def tables(self, graph: Graph) -> list[str]:
         """The tables this database hosts, in graph order."""

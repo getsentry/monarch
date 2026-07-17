@@ -34,8 +34,7 @@ class BlobMembership:
 
     def add(self, key: str) -> None:
         self.book.execute(
-            "INSERT INTO blob_key (move_id, store, key) VALUES (%s, %s, %s)"
-            " ON CONFLICT DO NOTHING",
+            "INSERT INTO blob_key (move_id, store, key) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
             (self.move_id, self.store, key),
         )
 
@@ -49,16 +48,15 @@ class BlobMembership:
 
     def mark_copied(self, key: str) -> None:
         self.book.execute(
-            "UPDATE blob_key SET copied_at = now()"
-            " WHERE move_id = %s AND store = %s AND key = %s",
+            "UPDATE blob_key SET copied_at = now() WHERE move_id = %s AND store = %s AND key = %s",
             (self.move_id, self.store, key),
         )
 
     def counts(self) -> tuple[int, int]:
         """(copied, total)."""
         row = self.book.execute(
-            "SELECT count(copied_at), count(*) FROM blob_key"
-            " WHERE move_id = %s AND store = %s",
+            "SELECT count(copied_at), count(*) FROM blob_key WHERE move_id = %s AND store = %s",
             (self.move_id, self.store),
         ).fetchone()
+        assert row is not None
         return row[0], row[1]

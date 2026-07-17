@@ -105,7 +105,8 @@ def run_streams(
         # parents only ever grow from this stream's own tables
         streams.append(
             _Stream(
-                s.store, cur,
+                s.store,
+                cur,
                 TailFilter(Decoder(s.conn), graph, {t: set(ids) for t, ids in membership.items()}),
                 units[s.store],
             )
@@ -118,7 +119,9 @@ def run_streams(
     for store, bm in blob_members.items():
         copied, total = bm.counts()
         pending_keys = total - copied
-        if not units[store].transition(UnitStatus.STREAMING, note=f"worker draining {pending_keys} pending key(s)"):
+        if not units[store].transition(
+            UnitStatus.STREAMING, note=f"worker draining {pending_keys} pending key(s)"
+        ):
             units[store].add_event("worker resumed")
     names = ", ".join(st.store for st in streams)
     print(f"\nstream: consuming slots on [{names}] for org changes (Ctrl-C to stop)\n")
@@ -277,10 +280,9 @@ class TailFilter:
             # is applied blind, letting the sink scope it: the sink holds only in-scope rows for
             # this id space (staged sink, no other tenants), so the delete hits our row or matches
             # nothing. Scoping at the source instead would need REPLICA IDENTITY FULL on leaves.
-            in_scope = (
-                change.table not in graph.parents
-                or change.get_int(key[0]) in membership.get(change.table, set())
-            )
+            in_scope = change.table not in graph.parents or change.get_int(
+                key[0]
+            ) in membership.get(change.table, set())
         elif (edge := graph.scope_edge(change.table)) is not None:
             value = change.get_int(edge.column)
             if value is None:

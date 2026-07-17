@@ -34,7 +34,6 @@ def load_from_config() -> tuple[str, Tables, dict[str, str]]:
 def topological_sort(root: str, tables: Tables) -> list[str]:
     """Order tables so a row's FK parents come before it (root first)."""
     deps = {
-        t: {ref["parent"] for ref in cols.values() if "parent" in ref}
-        for t, cols in tables.items()
+        t: {ref["parent"] for ref in cols.values() if "parent" in ref} for t, cols in tables.items()
     }
     return list(graphlib.TopologicalSorter(deps).static_order())

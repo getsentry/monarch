@@ -18,6 +18,8 @@ import yaml
 from dependencies import FLEET, load_from_config
 from generate_data import write_blob
 
+from monarch.utils import trust_sql
+
 Conns = dict[str, psycopg.Connection]  # store -> its hosting primary
 
 
@@ -36,7 +38,8 @@ def connect_sources() -> tuple[Conns, dict[str, dict]]:
 def read_orgs(conns: Conns) -> list[int]:
     """Every org in the source cell, read live from the root table."""
     root, _, store_of = load_from_config()
-    return [r[0] for r in conns[store_of[root]].execute(f'SELECT id FROM "{root}"').fetchall()]
+    rows = conns[store_of[root]].execute(trust_sql(f'SELECT id FROM "{root}"')).fetchall()
+    return [r[0] for r in rows]
 
 
 def align_sequences(conns: Conns) -> None:
@@ -45,8 +48,10 @@ def align_sequences(conns: Conns) -> None:
     _, _, store_of = load_from_config()
     for table, store in store_of.items():
         conns[store].execute(
-            f"""SELECT setval(pg_get_serial_sequence('"{table}"', 'id'),
+            trust_sql(
+                f"""SELECT setval(pg_get_serial_sequence('"{table}"', 'id'),
                              (SELECT COALESCE(MAX(id), 1) FROM "{table}"))"""
+            )
         )
 
 
@@ -108,9 +113,11 @@ def upload_file(conns: Conns, blobs: dict, org: int, n: int) -> str:
     contents = f"traffic file #{n} for org {org}\n"
     key = hashlib.sha1(contents.encode()).hexdigest()
     write_blob(blobs["filestore"], key, contents)
-    row = conns["files"].execute(
-        "INSERT INTO file (project_id, path) VALUES (%s, %s) RETURNING id", (org, key)
-    ).fetchone()
+    row = (
+        conns["files"]
+        .execute("INSERT INTO file (project_id, path) VALUES (%s, %s) RETURNING id", (org, key))
+        .fetchone()
+    )
     assert row is not None
     return f"+file {row[0]} (blob {key[:8]})"
 
@@ -120,11 +127,15 @@ def attach(conns: Conns, blobs: dict, org: int, n: int) -> str:
     contents = f"traffic attachment #{n} for org {org}\n"
     key = f"project={org}/eventattachment-t{n}"
     write_blob(blobs["objectstore"], key, contents)
-    row = conns["attachments"].execute(
-        "INSERT INTO eventattachment (project_id, group_id, blob_path)"
-        " VALUES (%s, NULL, %s) RETURNING id",
-        (org, key),
-    ).fetchone()
+    row = (
+        conns["attachments"]
+        .execute(
+            "INSERT INTO eventattachment (project_id, group_id, blob_path)"
+            " VALUES (%s, NULL, %s) RETURNING id",
+            (org, key),
+        )
+        .fetchone()
+    )
     assert row is not None
     return f"+eventattachment {row[0]}"
 

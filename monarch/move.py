@@ -1,5 +1,6 @@
 """The move domain model -- phases, unit statuses, the transitions between them -- and its
-persistence in the monarch_ledger database (schema: migrations/ledger.sql, DSN: fleet.yaml `ledger:`).
+persistence in the monarch_ledger database (schema: migrations/ledger.sql, DSN:
+fleet.yaml `ledger:`).
 
 Transitions are compare-and-swaps: zero rows updated means the state moved underneath the
 caller, which must re-read, never retry blindly. Every transition writes its move_event in
@@ -182,7 +183,9 @@ class MoveUnit:
         )
 
     def heartbeat(
-        self, applied: str | None = None, head: str | None = None,
+        self,
+        applied: str | None = None,
+        head: str | None = None,
         last_commit_at: datetime | None = None,
     ) -> None:
         """Liveness, overwritten on a clock: the mover can't announce its death, so it
@@ -216,9 +219,7 @@ def create(
         assert row is not None
         move = Move(conn, row[0])
         for unit in units:
-            conn.execute(
-                "INSERT INTO move_unit (move_id, unit) VALUES (%s, %s)", (move.id, unit)
-            )
+            conn.execute("INSERT INTO move_unit (move_id, unit) VALUES (%s, %s)", (move.id, unit))
         move.add_event(f"move created: org {root_id}, {source_cell} -> {sink_cell}")
     return move
 

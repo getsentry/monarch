@@ -18,6 +18,7 @@ from psycopg import Connection
 from psycopg2.extras import LogicalReplicationConnection
 
 from .config import Graph
+from .utils import trust_sql
 
 
 def publication_names(org_id: int, store: str) -> list[str]:
@@ -122,7 +123,7 @@ def create_publications(
         "WITH (publish = 'update, delete, truncate', publish_via_partition_root = true)",
     ]
     for statement in statements:
-        admin.execute(statement)
+        admin.execute(trust_sql(statement))
     for _ in range(100):
         if all(publication_exists(standby, name) for name in (ins, mut)):
             return statements
@@ -139,7 +140,7 @@ def publication_exists(conn: Connection, name: str) -> bool:
 
 def drop_publication(conn: Connection, name: str) -> None:
     """Drop the org's publication alongside its slots (after cutover, or aborting a move)."""
-    conn.execute(f"DROP PUBLICATION IF EXISTS {name}")
+    conn.execute(trust_sql(f"DROP PUBLICATION IF EXISTS {name}"))
 
 
 def connect_replication(dsn: str) -> LogicalReplicationConnection:
@@ -180,12 +181,13 @@ def create_slot(dsn: str, name: str) -> Iterator[tuple[str, str]]:
     """
     Create the slot and yield (consistent_point, snapshot_name). The exported snapshot is
     importable only while the creating connection stays open and idle (any other command on it,
-    even a simple SELECT 1, invalidates the name). The snapshot transaction adopts it via SET TRANSACTION
-    SNAPSHOT with at least REPEATABLE READ transaction isolation.
+    even a simple SELECT 1, invalidates the name). The snapshot transaction adopts it via
+    SET TRANSACTION SNAPSHOT with at least REPEATABLE READ transaction isolation.
 
-    The slot is dropped on any exception to prevent a failed snapshot from leaking. An abandoned slot is
-    deadly since it retains WAL until the source's disk fills. The drop is best-effort over a fresh
-    connection, since the replication connection may have died at that point.
+    The slot is dropped on any exception to prevent a failed snapshot from leaking. An
+    abandoned slot is deadly since it retains WAL until the source's disk fills. The drop
+    is best-effort over a fresh connection, since the replication connection may have died
+    at that point.
 
     On clean exit the slot survives so the stream can resume it later.
     """

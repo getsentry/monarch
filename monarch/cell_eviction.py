@@ -55,9 +55,9 @@ def run_evict(
                 blob_store = graph.stores[store]
                 if not isinstance(blob_store, BlobStore) or blob_store.eviction != "delete":
                     continue  # keep: the owning service's GC reclaims after the rows go
-                blob_keys = sql.SQL("SELECT DISTINCT {c} FROM {t} WHERE {p} AND {c} IS NOT NULL").format(
-                    c=sql.Identifier(column), t=sql.Identifier(table), p=pred
-                )
+                blob_keys = sql.SQL(
+                    "SELECT DISTINCT {c} FROM {t} WHERE {p} AND {c} IS NOT NULL"
+                ).format(c=sql.Identifier(column), t=sql.Identifier(table), p=pred)
                 removed = sum(
                     delete_blob(buckets[store], key)
                     for (key,) in conn_for[table].execute(blob_keys).fetchall()
@@ -65,7 +65,9 @@ def run_evict(
                 print(f"  {table:<16} {removed} object(s) deleted from {store}")
 
         for table, pred in reversed(scoped):
-            deleted = conn_for[table].execute(
-                sql.SQL("DELETE FROM {} WHERE {}").format(sql.Identifier(table), pred)
-            ).rowcount
+            deleted = (
+                conn_for[table]
+                .execute(sql.SQL("DELETE FROM {} WHERE {}").format(sql.Identifier(table), pred))
+                .rowcount
+            )
             print(f"  {table:<16} {deleted} row(s) deleted")

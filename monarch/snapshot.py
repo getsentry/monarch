@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from psycopg import Connection, IsolationLevel, sql
 
 from .config import Cell, Graph
+from .utils import trust_sql
 from .membership import BlobMembership, Membership
 
 
@@ -55,7 +56,7 @@ def estimate_rows(
         if (predicate := estimate_predicate(graph, table, org_id, frozen_ids)) is None:
             continue
         row = conn.execute(
-            f'EXPLAIN (FORMAT JSON) SELECT 1 FROM "{table}" WHERE {predicate}'
+            trust_sql(f'EXPLAIN (FORMAT JSON) SELECT 1 FROM "{table}" WHERE {predicate}')
         ).fetchone()
         assert row is not None
         total += int(row[0][0]["Plan"]["Plan Rows"])

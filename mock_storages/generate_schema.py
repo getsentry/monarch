@@ -3,6 +3,7 @@
 Uses manifest.yaml to generate a Sentry-like schema with realistic FK
 relationships. This is applied to the source and sink databases for the demo.
 """
+
 import sys
 
 from dependencies import load_from_config, topological_sort

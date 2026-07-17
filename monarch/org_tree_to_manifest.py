@@ -122,9 +122,7 @@ def convert_org_tree(org_tree: dict[str, Any]) -> dict[str, Any]:
 def excluded_models(nodes: list[dict[str, Any]], by_model: dict[str, dict[str, Any]]) -> set[str]:
     """Models in EXCLUDED_STORES, plus (transitively) any model whose only scoping ref
     pointed into the excluded set -- such a table can't be walked from the root."""
-    excluded = {
-        node["model_name"] for node in nodes if store_of(node) in EXCLUDED_STORES
-    }
+    excluded = {node["model_name"] for node in nodes if store_of(node) in EXCLUDED_STORES}
     while True:
         orphaned = {
             node["model_name"]
