@@ -217,10 +217,16 @@ def cmd_evict(org_id: int, graph: Graph, cell: Cell, ledger_dsn: str, move_id: i
             db.primary_dsn: stack.enter_context(connect(db.primary_dsn)) for db in cell.databases
         }
         buckets = {name: Bucket(loc["file_path"]) for name, loc in cell.blobs.items()}
-        run_evict(conns, cell, graph, org_id, buckets)
-    # the completion is journaled against the move -- the fact the dashboard's gate watches
+        rows_by_store, blobs_by_store = run_evict(conns, cell, graph, org_id, buckets)
+    # per-store counts on each unit (where store-worker eviction will write them), plus the
+    # move-level completion the dashboard's gate watches
     with connect(ledger_dsn) as book:
-        move.Move(book, move_id).add_event(f"org evicted from {cell.name}")
+        m = move.Move(book, move_id)
+        for store, rows in rows_by_store.items():
+            move.MoveUnit(m, store).add_event(f"evicted from {cell.name}: {rows} row(s)")
+        for store, objects in blobs_by_store.items():
+            move.MoveUnit(m, store).add_event(f"evicted from {cell.name}: {objects} object(s)")
+        m.add_event(f"org evicted from {cell.name}")
 
 
 def main() -> None:

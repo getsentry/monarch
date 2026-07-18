@@ -24,10 +24,11 @@ def run_evict(
     graph: Graph,
     root_id: int,
     buckets: dict[str, Bucket],
-) -> None:
+) -> tuple[dict[str, int], dict[str, int]]:
     """Scoped deletes across every database in `cell`, children first. Keys are read from the
     cell itself, so eviction is self-contained and idempotent: a re-run matches nothing.
-    One transaction per database -- atomic per database, not across them (as everywhere)."""
+    One transaction per database -- atomic per database, not across them (as everywhere).
+    Returns (rows deleted per postgres store, objects deleted per blob store)."""
     print(f"evict: removing org {root_id} from cell {cell.name}\n")
     conn_for = {t: conns[db.primary_dsn] for db in cell.databases for t in db.tables(graph)}
     with ExitStack() as stack:
@@ -50,6 +51,7 @@ def run_evict(
         # Objects before rows: a delete-on-eviction store's keys are only recoverable while the
         # rows still name them. A crash in between leaves rows whose objects are gone -- fine
         # for a doomed copy; the rerun's object deletes are no-ops and the rows still go.
+        blobs_by_store: dict[str, int] = {}
         for table, pred in scoped:
             for column, store in graph.blobs.get(table, {}).items():
                 blob_store = graph.stores[store]
@@ -62,12 +64,17 @@ def run_evict(
                     delete_blob(buckets[store], key)
                     for (key,) in conn_for[table].execute(blob_keys).fetchall()
                 )
+                blobs_by_store[store] = blobs_by_store.get(store, 0) + removed
                 print(f"  {table:<16} {removed} object(s) deleted from {store}")
 
+        rows_by_store: dict[str, int] = {}
         for table, pred in reversed(scoped):
             deleted = (
                 conn_for[table]
                 .execute(sql.SQL("DELETE FROM {} WHERE {}").format(sql.Identifier(table), pred))
                 .rowcount
             )
+            store = graph.store_of[table]
+            rows_by_store[store] = rows_by_store.get(store, 0) + deleted
             print(f"  {table:<16} {deleted} row(s) deleted")
+    return rows_by_store, blobs_by_store
