@@ -6,18 +6,21 @@ it if not, so a re-poll is a no-op.
 
 One worker per store, assumed sole owner: the replication slot's single-consumer rule and
 unique name are the backstops if that's ever violated, so no ledger-level claim is kept. Run
-per store as `monarch worker --store files --org-id 42`; Ctrl-C to stop.
+per store as `monarch worker --store files`; Ctrl-C to stop.
 
-Reconciled so far: status `copying` -> create publications, snapshot the store to the sink,
-mark `copied`. Streaming and teardown reactions layer onto the same loop next."""
+Reactions so far: status `copying` -> create publications, snapshot the store to the sink,
+mark `copied`; status `streaming` -> resume the slot and stream (copying blob bytes too)
+until stop moves the unit back to `copied`. Teardown layers onto the same loop next."""
 
 import time
 from contextlib import ExitStack, closing
 
 from . import move, slot
+from .blobs import blob_copiers
 from .config import Cell, Graph, connect
 from .membership import BlobMembership
-from .snapshot import Source, read_frozen_ids, run_snapshot
+from .snapshot import Source, derive_membership, read_frozen_ids, run_snapshot
+from .stream import StreamSource, run_streams
 
 POLL_SECONDS = 1.0
 
@@ -27,13 +30,15 @@ def run_worker(store: str, graph: Graph, cells: dict[str, Cell], ledger_dsn: str
     with closing(connect(ledger_dsn)) as book:
         while True:
             m = move.find_live(book)
-            # dispatch on the requested status (more branches -- streaming, teardown -- later)
-            if (
-                m is not None
-                and m.phase() is move.Phase.ACTIVE
-                and move.MoveUnit(m, store).status() is move.UnitStatus.COPYING
-            ):
-                snapshot(store, m.root_id(), graph, cells, book, m)
+            if m is not None and m.phase() is move.Phase.ACTIVE:
+                # dispatch on the requested status (teardown branch layers on next)
+                match move.MoveUnit(m, store).status():
+                    case move.UnitStatus.COPYING:
+                        snapshot(store, m.root_id(), graph, cells, book, m)
+                    case move.UnitStatus.STREAMING:
+                        stream(store, m.root_id(), graph, cells, book, m)
+                    case _:
+                        pass
             time.sleep(POLL_SECONDS)
 
 
@@ -87,3 +92,29 @@ def snapshot(
         blob_unit.record_copy_total(total)
         blob_unit.transition(move.UnitStatus.COPIED, note=f"{total} key(s) recorded")
     print(f"worker[{store}]: snapshot complete ({rows} rows)")
+
+
+def stream(
+    store: str, org_id: int, graph: Graph, cells: dict[str, Cell], book, m: move.Move
+) -> None:
+    """The `streaming` reaction: resume the store's slot and stream (copying blob bytes too),
+    deriving membership from the sink. run_streams polls the ledger on its heartbeat tick and
+    returns when the unit moves off streaming (stop -> copied) or the move leaves active --
+    the slot is retained for a resume."""
+    source, sink = (cells[c] for c in m.cells())
+    src_db = next(db for db in source.databases if store in db.stores)
+    blobs = {b for t in graph.store_tables(store) for b in graph.blobs.get(t, {}).values()}
+    with ExitStack() as stack:
+        sinks = {
+            db.primary_dsn: stack.enter_context(connect(db.primary_dsn)) for db in sink.databases
+        }
+        membership = derive_membership(sinks, sink, graph, org_id)
+        conn = stack.enter_context(connect(src_db.decode_dsn))
+        repl = stack.enter_context(closing(slot.connect_replication(src_db.decode_dsn)))
+        pubs = ",".join(slot.publication_names(org_id, store))
+        src = StreamSource(store, conn, repl, slot.slot_name(org_id, store), pubs)
+        blob_members = {b: BlobMembership(book, m.id, b) for b in blobs}
+        copiers = {b: c for b, c in blob_copiers(graph, source, sink).items() if b in blobs}
+        units = {store: move.MoveUnit(m, store)} | {b: move.MoveUnit(m, b) for b in blobs}
+        run_streams([src], sinks, sink, graph, membership, copiers, blob_members, units)
+    print(f"worker[{store}]: stream stopped (slot retained)")

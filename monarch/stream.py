@@ -151,6 +151,16 @@ def run_streams(
                 copied, total = bm.counts()  # applied/head take each backend's own units: keys here
                 units[store].heartbeat(applied=str(copied), head=str(total))
             last_beat = now
+            # stop is a ledger fact, not a signal: the operator moved a unit off streaming
+            # (stop -> copied) or the move left active (cutover/abort). Return with the slot
+            # retained -- a re-trigger resumes it; blob units rest alongside.
+            m = next(iter(units.values())).move
+            if m.phase() is not Phase.ACTIVE or any(
+                u.status() is not UnitStatus.STREAMING for u in units.values()
+            ):
+                for store in blob_members:
+                    units[store].transition(UnitStatus.COPIED, note="stream stopped")
+                return
         idle = True
         for st in streams:
             if (msg := st.cursor.read_message()) is None:

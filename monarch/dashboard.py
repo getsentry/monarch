@@ -27,9 +27,6 @@ from . import move
 from .config import BlobStore, Cell, Graph, list_units
 from .utils import trust_sql
 
-_stream_proc: subprocess.Popen | None = None  # the last stream child; dies with us (one
-# process group), so a stale handle can't outlive a restart
-
 
 def describe_topology(graph: Graph, cells: dict[str, Cell]) -> dict:
     """Static topology, computed once from the manifest + fleet: the diagram is a rendering
@@ -142,24 +139,6 @@ def read_moves(conn: Connection) -> dict:
     return {"moves": moves}
 
 
-def resume_stream(conn: Connection) -> None:
-    """Startup reconcile: a dashboard Ctrl-C takes its spawned movers with it (one
-    foreground process group), so a restart may find units `streaming` with nobody
-    behind them -- respawn unconditionally. No liveness check needed: slots are
-    single-consumer, so a duplicate mover loses the acquisition and exits."""
-    row = conn.execute(
-        "SELECT root_id FROM move WHERE phase = 'active' AND EXISTS"
-        " (SELECT 1 FROM move_unit WHERE move_id = move.id AND status = 'streaming')"
-    ).fetchone()
-    if row is None:
-        return
-    global _stream_proc
-    _stream_proc = subprocess.Popen(
-        [sys.executable, "-m", "monarch.cli", "stream", "--org-id", str(row[0])]
-    )
-    print(f"{datetime.now():%H:%M:%S} resuming stream for org {row[0]} (pid {_stream_proc.pid})")
-
-
 def _to_json(payload: dict) -> bytes:
     return json.dumps(
         payload, default=lambda o: o.isoformat() if isinstance(o, datetime) else str(o)
@@ -193,9 +172,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/snapshot":
             self._transition(body, move.UnitStatus.COPYING, "snapshot requested")
         elif path == "/stream":
-            self._spawn_step(body, "stream")
+            self._transition(body, move.UnitStatus.STREAMING, "stream requested")
         elif path == "/stop-stream":
-            self._stop_stream()
+            self._transition(body, move.UnitStatus.COPIED, "stream stopped")
         elif path == "/cutover":
             self._cutover(body)
         elif path == "/finalize":
@@ -234,34 +213,6 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._respond(200, "application/json", _to_json({"id": m.id}))
 
-    def _stop_stream(self) -> None:
-        global _stream_proc
-        if _stream_proc is None or _stream_proc.poll() is not None:
-            self._respond(
-                409,
-                "application/json",
-                _to_json(
-                    {
-                        "error": "no stream child of this dashboard — "
-                        "started elsewhere? kill it directly"
-                    }
-                ),
-            )
-            return
-        # SIGTERM, not SIGINT: `make run` backgrounds the dashboard, so it and the cmd_stream
-        # it spawns inherit SIG_IGN for SIGINT and would ignore it. cmd_stream dies abruptly
-        # (no clean journal line), but the slot persists server-side and PG frees it when the
-        # connection drops. Goes away once streaming becomes a worker reaction.
-        _stream_proc.terminate()
-        try:
-            _stream_proc.wait(timeout=10)  # usually sub-second; polls just queue behind it
-        except subprocess.TimeoutExpired:
-            self._respond(
-                202, "application/json", _to_json({"error": "SIGTERM sent but exit unconfirmed"})
-            )
-            return
-        self._respond(200, "application/json", _to_json({"stopped": _stream_proc.pid}))
-
     def _transition(self, body, target: "move.Phase | move.UnitStatus", note: str) -> None:
         """The dashboard's whole write side: CAS the requested state into the ledger and let
         the workers respond. A Phase advances the move; a UnitStatus advances every postgres
@@ -281,37 +232,31 @@ class Handler(BaseHTTPRequestHandler):
         self._respond(200, "application/json", _to_json({"target": target, "moved": moved}))
 
     def _cutover(self, body) -> None:
-        """Demo drain + cut-over: movers must have streamed and be stopped, then two phase
-        compare-and-swaps and their journal lines -- no drain gates or routing flip yet.
-        The flip happens with nothing moving, so the sink is already at its final
-        pre-flip state."""
+        """Demo drain + cut-over: every unit must be stopped (back at `copied`, slot retained)
+        -- derived from the ledger, not a process handle -- then two phase compare-and-swaps
+        and their journal lines. No real drain gate (applied >= head) yet; the flip happens
+        with nothing moving, so the sink is already at its final pre-flip state."""
         try:
             move_id = int(body["move"])
         except (KeyError, TypeError, ValueError):
             self._respond(400, "application/json", _to_json({"error": "expected {move}"}))
             return
-        if _stream_proc is not None and _stream_proc.poll() is None:
-            self._respond(
-                409,
-                "application/json",
-                _to_json({"error": "stop the stream first — the flip requires stopped movers"}),
-            )
-            return
+        # every unit must have streamed (heartbeat_at set -- only run_streams writes it, and it
+        # survives a stop) and be stopped (back at copied). The caught-up check (applied >= head)
+        # is the deferred drain gate.
         row = self.conn.execute(
-            "SELECT count(*) FROM move_unit WHERE move_id = %s AND status != 'streaming'",
+            "SELECT count(*) FROM move_unit"
+            " WHERE move_id = %s AND (status != 'copied' OR heartbeat_at IS NULL)",
             (move_id,),
         ).fetchone()
         assert row is not None
-        never_streamed = row[0]
-        if never_streamed:
+        not_ready = row[0]
+        if not_ready:
             self._respond(
                 409,
                 "application/json",
                 _to_json(
-                    {
-                        "error": "the stream never ran — every store must "
-                        "reach streaming before the flip"
-                    }
+                    {"error": "stream then stop first — every unit must have streamed, then copied"}
                 ),
             )
             return
@@ -423,33 +368,6 @@ class Handler(BaseHTTPRequestHandler):
                 _to_json({"error": "nothing abortable — the phase moved on"}),
             )
 
-    def _spawn_step(self, body, command: str) -> None:
-        """Spawn a CLI step as a child of the dashboard: it can't run in-process (long work
-        would block this single-threaded server's polls), and no completion tracking is
-        needed -- the ledger writes the command makes are the progress signal the page
-        already watches. Output lands in the dashboard's terminal; a failed run advances
-        nothing, so the gates simply don't advance. The CLI-in-a-subprocess seam is the
-        prototype's boundary; the destination is the dashboard as coordinator, running
-        these as managed in-process jobs over the same domain layer."""
-        try:
-            move_id = int(body["move"])
-        except (KeyError, TypeError, ValueError):
-            self._respond(400, "application/json", _to_json({"error": "expected {move}"}))
-            return
-        row = self.conn.execute(
-            "SELECT root_id, source_cell, phase FROM move WHERE id = %s", (move_id,)
-        ).fetchone()
-        if row is None or row[2] != "active":
-            self._respond(409, "application/json", _to_json({"error": "needs an active move"}))
-            return
-        args = [sys.executable, "-m", "monarch.cli", command, "--org-id", str(row[0])]
-        proc = subprocess.Popen(args)
-        if command == "stream":
-            global _stream_proc
-            _stream_proc = proc
-        print(f"{datetime.now():%H:%M:%S} spawned `monarch {' '.join(args[3:])}` (pid {proc.pid})")
-        self._respond(202, "application/json", _to_json({"spawned": command}))
-
     def do_GET(self) -> None:
         url = urlparse(self.path)
         if url.path == "/state":
@@ -457,9 +375,6 @@ class Handler(BaseHTTPRequestHandler):
             since = int(qs.get("since", ["0"])[0])
             move_id = int(qs["move"][0]) if "move" in qs else None
             state = read_state(self.conn, since, move_id)
-            # process truth from the parent: exact and instant for children we spawned;
-            # a mover started elsewhere is invisible (its duplicate spawn loses the slot)
-            state["movers_alive"] = _stream_proc is not None and _stream_proc.poll() is None
             self._respond(200, "application/json", _to_json(state))
         elif url.path == "/moves":
             self._respond(200, "application/json", _to_json(read_moves(self.conn)))
@@ -496,7 +411,6 @@ class Handler(BaseHTTPRequestHandler):
 def run_dashboard(conn: Connection, port: int, graph: Graph, cells: dict[str, Cell]) -> None:
     """Single-threaded on purpose: one shared ledger connection, one polling client."""
     topology = describe_topology(graph, cells)
-    resume_stream(conn)
     server = HTTPServer(("127.0.0.1", port), partial(Handler, conn, topology, graph, cells))
     print(f"dashboard: http://127.0.0.1:{port}")
     server.serve_forever()

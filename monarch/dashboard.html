@@ -397,7 +397,7 @@ async function poll() {
   $("pill").className = `pill ${PILL[m.phase] ?? ""}`;
   lastMove = m;
   lastUnits = state.units;
-  moversAlive = !!state.movers_alive;
+  streaming = state.units.some(u => u.status === "streaming");
   tintStores(m, state.units);
   appendEvents(state.events);
   renderSnapshot(state.units);
@@ -502,21 +502,21 @@ const ACTIONS = [
     run: async note => {
       const { ok, status, body } = await post("/stream", { move: +pinned });
       if (!ok) { note(body.error ?? `failed (${status}) — restart \`monarch dashboard\`?`); return false; }
-      note("stream spawned — heartbeats confirm each store's mover");
+      note("stream requested — each store's worker resumes its slot and streams");
       return true;
     },
-    // copied = fresh start; streaming with no live movers = restart after a stop/crash
+    // all copied = ready to stream (fresh after snapshot, or a resume after a stop)
     arm: m => !m || m.phase !== "active" ? "needs an active move"
       : !lastUnits.every(u => ["copied", "streaming"].includes(u.status)) ? "run snapshot first"
-      : moversAlive ? "movers are already running" : null },
+      : streaming ? "already streaming" : null },
   { label: "stop stream",
     run: async note => {
-      const { ok, status, body } = await post("/stop-stream", {});
+      const { ok, status, body } = await post("/stop-stream", { move: +pinned });
       if (!ok) { note(body.error ?? `failed (${status}) — restart \`monarch dashboard\`?`); return false; }
-      note("stream stopped — exit confirmed; abort and restart are armed");
+      note("stream stop requested — workers return to copied; slot retained for a resume");
       return true;
     },
-    arm: m => moversAlive ? null : "no live movers" },
+    arm: m => streaming ? null : "no stream running" },
   { label: "drain + cut over",
     run: async note => {
       const { ok, status, body } = await post("/cutover", { move: +pinned });
@@ -525,9 +525,8 @@ const ACTIONS = [
       return true;
     },
     arm: m => !m || m.phase !== "active" ? "needs an active move"
-      : !lastUnits.every(u => ["copied", "streaming"].includes(u.status)) ? "run snapshot first"
-      : !lastUnits.every(u => u.status === "streaming") ? "start the stream first — every store must have streamed"
-      : moversAlive ? "stop the stream first — flip only with movers stopped" : null },
+      : !lastUnits.every(u => u.heartbeat_at != null) ? "start the stream first — every unit must have streamed"
+      : !lastUnits.every(u => u.status === "copied") ? "stop the streams first — every unit must be back at copied" : null },
   { label: "finalize",
     run: async note => {
       const { ok, status, body } = await post("/finalize", { move: +pinned });
@@ -553,7 +552,7 @@ const ACTIONS = [
       return true;
     },
     arm: m => !m || !["active", "draining"].includes(m.phase) ? "nothing abortable"
-      : moversAlive ? "stop the stream first — movers are still alive" : null },
+      : streaming ? "stop the streams first — a unit is still streaming" : null },
   { label: "scrub sink copy",
     run: async note => {
       const { ok, status, body } = await post("/evict", { move: +pinned });
@@ -605,8 +604,9 @@ $("actionbtns").addEventListener("click", async e => {
 
 // ---- popovers: the diagram stays sparse; context lives in hover, built at hover time
 // from config (topo) + the latest poll (lastMove/lastUnits) so it's always current
-// moversAlive is the parent's process truth (the dashboard's own stream child), via /state
-let lastMove = null, lastUnits = [], moversAlive = false;
+// `streaming` = any unit is in the streaming status (the move-level gates key off it);
+// per-unit liveness is heartbeat freshness, read in the popover
+let lastMove = null, lastUnits = [], streaming = false;
 
 function storeTip(s) {
   const cell = lastMove?.source_cell ?? Object.keys(topo.placement)[0];
@@ -632,7 +632,7 @@ function storeTip(s) {
     if (u.copy_rows_total != null) lines += ` · ${fmt(u.copy_rows_total)} rows copied` +
       (u.copy_rows_estimate != null ? ` (est ~${fmt(u.copy_rows_estimate)})` : "");
     else if (u.copy_rows_estimate != null) lines += ` · ~${fmt(u.copy_rows_estimate)} rows expected`;
-    if (u.heartbeat_at) lines += `<br>mover: <b>${moversAlive ? "alive" : "not running"}</b>` +
+    if (u.heartbeat_at) lines += `<br>mover: <b>${Date.now() - new Date(u.heartbeat_at) < 15000 ? "alive" : "not running"}</b>` +
       ` — last heartbeat ${fmtDur(Date.now() - new Date(u.heartbeat_at))} ago`;
     else if (u.status !== "pending") lines += `<br>mover: no heartbeat yet`;
     if (u.status === "streaming" && lagBytes(u) != null)

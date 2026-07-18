@@ -69,7 +69,10 @@ MOVE_UNIT_TRANSITIONS: dict[UnitStatus, set[UnitStatus]] = {
     UnitStatus.PENDING: {UnitStatus.COPYING},
     UnitStatus.COPYING: {UnitStatus.COPIED, UnitStatus.STREAM_ENDED},  # ended = abort mid-copy
     UnitStatus.COPIED: {UnitStatus.STREAMING, UnitStatus.STREAM_ENDED},  # ended = abort pre-stream
-    UnitStatus.STREAMING: {UnitStatus.STREAM_ENDED},
+    # back to copied = stop the stream: consumer stops, slot retained (copied's resting
+    # meaning), a re-trigger resumes it. copied thus has two sources -- snapshot-done and
+    # stream-stopped -- both meaning "slot exists, nothing consuming".
+    UnitStatus.STREAMING: {UnitStatus.STREAM_ENDED, UnitStatus.COPIED},
     UnitStatus.STREAM_ENDED: set(),
 }
 
