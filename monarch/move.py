@@ -23,6 +23,7 @@ class Phase(StrEnum):
     ACTIVE = "active"
     DRAINING = "draining"
     CUT_OVER = "cut_over"
+    EVICTING = "evicting"
     FAILED = "failed"
     FINALIZED = "finalized"
     REVERTING = "reverting"
@@ -36,30 +37,37 @@ class UnitStatus(StrEnum):
     actually is. Drain-done is a live comparison of applied against the source head at the
     cut-over attempt, never stored; liveness is heartbeat_at.
     stream_ended is recorded by teardown (finalize and abort alike) as it drops each slot,
-    do-then-record; pg_replication_slots stays ground truth if they ever disagree."""
+    do-then-record; pg_replication_slots stays ground truth if they ever disagree. evicted is
+    the finalize path's last step -- the store's source rows and blobs are deleted -- and the
+    move finalizes once every unit reaches it; stream_ended stays terminal on the abort path
+    (the sink scrub is post-terminal cleanup)."""
 
     PENDING = "pending"
     COPYING = "copying"
     COPIED = "copied"
     STREAMING = "streaming"
     STREAM_ENDED = "stream_ended"
+    EVICTED = "evicted"
 
 
 # The move's state machine (domain shape, not storage -- executed here because transitions
 # run here): state -> states legally reachable in one step. Forward-only. Pre-flip, giving
 # up is terminal directly (aborted: move dead, org never left the source -- lossless; sink
-# scrub is post-terminal inspect-then-act work, no phase needed). Post-flip there are two
-# ways down: cut_over -> finalized (source scrubbed and verified; the true point of no
-# return) and cut_over -> reverting -> aborted, the emergency escape: routing flips back to
-# the source and every write the sink took since the flip is lost. A destination may have
-# several sources only when the transition means the same thing from each (aborted: move
-# dead, org on source; stream_ended: teardown). Gates (writes stopped? every unit caught
-# up?) are the caller's conditions for *attempting* a transition; these maps only define
-# which transitions exist.
+# scrub is post-terminal inspect-then-act work, no phase needed). Post-flip the source copy
+# is removed before the close: cut_over -> evicting (slots/pubs dropped, then the org's
+# source rows + blobs deleted) -> finalized (source gone, org only in the sink -- the true
+# point of no return). The emergency escape cut_over -> reverting -> aborted (routing flips
+# back to the source, sink writes since the flip lost) is offered ONLY from cut_over: once
+# evicting starts the source is going away, so there is nothing to revert to. A destination
+# may have several sources only when the transition means the same thing from each (aborted:
+# move dead, org on source; stream_ended: teardown). Gates (writes stopped? every unit caught
+# up? every unit evicted?) are the caller's conditions for *attempting* a transition; these
+# maps only define which transitions exist.
 MOVE_TRANSITIONS: dict[Phase, set[Phase]] = {
     Phase.ACTIVE: {Phase.DRAINING, Phase.FAILED, Phase.ABORTED},
     Phase.DRAINING: {Phase.CUT_OVER, Phase.FAILED, Phase.ABORTED},
-    Phase.CUT_OVER: {Phase.FINALIZED, Phase.REVERTING, Phase.FAILED},
+    Phase.CUT_OVER: {Phase.EVICTING, Phase.REVERTING, Phase.FAILED},
+    Phase.EVICTING: {Phase.FINALIZED, Phase.FAILED},  # no revert: the source is being deleted
     Phase.REVERTING: {Phase.FAILED, Phase.ABORTED},
     Phase.FAILED: {Phase.ABORTED},
     Phase.FINALIZED: set(),
@@ -73,7 +81,8 @@ MOVE_UNIT_TRANSITIONS: dict[UnitStatus, set[UnitStatus]] = {
     # meaning), a re-trigger resumes it. copied thus has two sources -- snapshot-done and
     # stream-stopped -- both meaning "slot exists, nothing consuming".
     UnitStatus.STREAMING: {UnitStatus.STREAM_ENDED, UnitStatus.COPIED},
-    UnitStatus.STREAM_ENDED: set(),
+    UnitStatus.STREAM_ENDED: {UnitStatus.EVICTED},  # finalize path: source rows + blobs deleted
+    UnitStatus.EVICTED: set(),
 }
 
 

@@ -226,7 +226,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
-const PILL = { active: "run", draining: "warn", cut_over: "warn",
+const PILL = { active: "run", draining: "warn", cut_over: "warn", evicting: "warn",
                finalized: "ok", reverting: "bad", aborted: "bad" };
 const fmt = n => Number(n).toLocaleString("en-US");
 const fmtBytes = n => n < 1024 ? `${n} B`
@@ -531,7 +531,7 @@ const ACTIONS = [
     run: async note => {
       const { ok, status, body } = await post("/finalize", { move: +pinned });
       if (!ok) { note(body.error ?? `failed (${status}) — restart \`monarch dashboard\`?`); return false; }
-      note("finalized — slots + publications dropped; evict source copy is armed");
+      note("evicting — slots + publications dropped; evict the source to close the move");
       return true;
     },
     arm: m => !m || m.phase !== "cut_over" ? "needs a cut-over move" : null },
@@ -539,11 +539,10 @@ const ACTIONS = [
     run: async note => {
       const { ok, status, body } = await post("/evict", { move: +pinned });
       if (!ok) { note(body.error ?? `failed (${status}) — restart \`monarch dashboard\`?`); return false; }
-      note("evict spawned — the journal confirms when the source copy is gone");
+      note("evicting source — the move finalizes once every store is evicted");
       return true;
     },
-    arm: m => !m || m.phase !== "finalized" ? "needs a finalized move"
-      : evicted ? "source copy already evicted" : null },
+    arm: m => !m || m.phase !== "evicting" ? "needs an evicting move" : null },
   { label: "abort move", danger: true,
     run: async note => {
       const { ok, status, body } = await post("/abort", { move: +pinned });

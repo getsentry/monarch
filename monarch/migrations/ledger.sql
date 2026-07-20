@@ -8,7 +8,8 @@ CREATE TABLE IF NOT EXISTS move (
     -- phases mark org-level semantic changes only (write-stopped, flipped, closed); unit progress
     -- is derived from move_unit rows, never stored here. born active: the insert is the lease
     phase       text        NOT NULL DEFAULT 'active'
-        CHECK (phase IN ('active', 'draining', 'cut_over', 'failed', 'finalized', 'reverting', 'aborted')),
+        CONSTRAINT move_phase_check CHECK (phase IN
+            ('active', 'draining', 'cut_over', 'evicting', 'failed', 'finalized', 'reverting', 'aborted')),
     created_at  timestamptz NOT NULL DEFAULT now(),
     updated_at  timestamptz NOT NULL DEFAULT now()
 );
@@ -17,19 +18,17 @@ CREATE TABLE IF NOT EXISTS move (
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_move
     ON move ((true)) WHERE phase NOT IN ('finalized', 'aborted');
 
-ALTER TABLE move DROP CONSTRAINT IF EXISTS move_phase_check;
-ALTER TABLE move ADD CONSTRAINT move_phase_check
-    CHECK (phase IN ('active', 'draining', 'cut_over', 'failed', 'finalized', 'reverting', 'aborted'));
-
 CREATE TABLE IF NOT EXISTS move_unit (
     move_id bigint NOT NULL REFERENCES move(id),
     unit    text   NOT NULL,
     -- the unit's pipe: is data flowing between the cells and does the pipe still exist.
     -- copied = the resting state between snapshot and stream: slot exists, retaining WAL,
-    -- nothing consuming yet. stream_ended is written by teardown (finalize and abort
-    -- alike) as it drops each slot
+    -- nothing consuming yet. stream_ended is written by teardown (finalize and abort alike)
+    -- as it drops each slot; evicted is the finalize path's last step (source rows + blobs
+    -- deleted), the derived gate the move finalizes on
     status  text   NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending', 'copying', 'copied', 'streaming', 'stream_ended')),
+        CONSTRAINT move_unit_status_check CHECK (status IN
+            ('pending', 'copying', 'copied', 'streaming', 'stream_ended', 'evicted')),
     -- the copy denominator, as two write-once facts: the planner's prediction at copy start
     -- (complete but inexact) and the actual at copy completion. UI divides by
     -- COALESCE(total, estimate); display only, nothing gates on either

@@ -227,6 +227,14 @@ def cmd_evict(org_id: int, graph: Graph, cell: Cell, ledger_dsn: str, move_id: i
         for store, objects in blobs_by_store.items():
             move.MoveUnit(m, store).add_event(f"evicted from {cell.name}: {objects} object(s)")
         m.add_event(f"org evicted from {cell.name}")
+        # source eviction (the evicting phase) drives every unit to evicted, then the derived
+        # gate -- all units evicted -- closes the move. Abort's sink scrub is post-terminal.
+        if m.phase() is move.Phase.EVICTING:
+            for (unit,) in book.execute(
+                "SELECT unit FROM move_unit WHERE move_id = %s", (move_id,)
+            ).fetchall():
+                move.MoveUnit(m, unit).transition(move.UnitStatus.EVICTED, note="source evicted")
+            m.transition(move.Phase.FINALIZED, note="every unit evicted; source gone")
 
 
 def main() -> None:

@@ -272,12 +272,11 @@ class Handler(BaseHTTPRequestHandler):
         self._respond(200, "application/json", _to_json({"phase": "cut_over"}))
 
     def _finalize(self, body) -> None:
-        """Finalize = teardown then the terminal compare-and-swap, do-then-record: drop the
-        slots, drop the publications, and only then phase -> finalized. Evicting the org's
-        source copy is post-terminal cleanup via the CLI, like abort's sink scrub -- it is
-        row-bound and can take a while, and the move's outcome doesn't depend on it. The
-        steps run synchronously -- seconds at demo scale; polls queue behind, as with
-        stop-stream. A step failure leaves the phase at cut_over for a re-run."""
+        """Finalize's first half: drop the slots + publications, mark each unit stream_ended,
+        and enter `evicting` -- the commit boundary, past which revert is gone. The source
+        copy itself is deleted by the evict step, which closes the move (-> finalized) once
+        every unit is evicted. Teardown runs synchronously; a failure leaves the phase at
+        cut_over for a re-run."""
         try:
             move_id = int(body["move"])
         except (KeyError, TypeError, ValueError):
@@ -290,11 +289,10 @@ class Handler(BaseHTTPRequestHandler):
             self._respond(409, "application/json", _to_json({"error": "needs a cut-over move"}))
             return
         org, source = row[0], row[1]
-        for command, extra in [
-            ("drop-slot", ["--from", source]),
-            ("drop-publication", ["--from", source]),
-        ]:
-            args = [sys.executable, "-m", "monarch.cli", command, "--org-id", str(org), *extra]
+        for command in ("drop-slot", "drop-publication"):
+            args = [
+                sys.executable, "-m", "monarch.cli", command, "--org-id", str(org), "--from", source
+            ]
             print(f"{datetime.now():%H:%M:%S} running `monarch {' '.join(args[3:])}`")
             if subprocess.run(args).returncode != 0:
                 self._respond(
@@ -303,7 +301,7 @@ class Handler(BaseHTTPRequestHandler):
                     _to_json(
                         {
                             "error": f"{command} failed — see the dashboard terminal;"
-                            " phase stays cut_over, fix and finalize again"
+                            " phase stays cut_over, finalize again"
                         }
                     ),
                 )
@@ -314,15 +312,15 @@ class Handler(BaseHTTPRequestHandler):
         ).fetchall()
         for (unit,) in units:
             move.MoveUnit(m, unit).transition(move.UnitStatus.STREAM_ENDED, note="teardown")
-        m.transition(
-            move.Phase.FINALIZED, note="slots + publications dropped; source copy awaits eviction"
-        )
-        self._respond(200, "application/json", _to_json({"phase": "finalized"}))
+        m.transition(move.Phase.EVICTING, note="slots + publications dropped; evicting the source")
+        self._respond(200, "application/json", _to_json({"phase": "evicting"}))
 
     def _evict(self, body) -> None:
-        """Post-terminal cleanup, spawned like the step commands: a finalized move evicts
-        the org's stale source copy, an aborted one scrubs the partial sink copy. The CLI
-        journals its completion, which is the fact the page's gate watches."""
+        """The evicting phase's action, spawned like the step commands: an `evicting` move
+        deletes the org's source copy and, once every unit is evicted, closes the move
+        (-> finalized) -- that transition lives in the CLI. An `aborted` move scrubs the
+        partial sink copy (post-terminal cleanup, no phase change). The CLI journals its
+        per-store counts, which the page's gate watches."""
         try:
             move_id = int(body["move"])
         except (KeyError, TypeError, ValueError):
@@ -331,12 +329,12 @@ class Handler(BaseHTTPRequestHandler):
         row = self.conn.execute(
             "SELECT root_id, source_cell, sink_cell, phase FROM move WHERE id = %s", (move_id,)
         ).fetchone()
-        if row is None or row[3] not in ("finalized", "aborted"):
+        if row is None or row[3] not in ("evicting", "aborted"):
             self._respond(
-                409, "application/json", _to_json({"error": "needs a finalized or aborted move"})
+                409, "application/json", _to_json({"error": "needs an evicting or aborted move"})
             )
             return
-        cell = row[1] if row[3] == "finalized" else row[2]
+        cell = row[1] if row[3] == "evicting" else row[2]
         args = [
             sys.executable,
             "-m",
