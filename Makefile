@@ -18,12 +18,13 @@ down:
 install:
 	uv sync
 
-# The fleet's databases (fleet.yaml): source + source_files on the pair, sink + monarch_ledger
+# The fleet's databases (fleet.yaml): source + source_files + source_metrics on the pair, sink + monarch_ledger
 # on the pg14 instance (the ledger = monarch's own move state; colocation is demo convenience,
 # not design -- in production this role belongs to the control silo)
 databases:
 	@$(SOURCE_PSQL) -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='source'" | grep -q 1 || $(SOURCE_PSQL) -d postgres -c "CREATE DATABASE source"
 	@$(SOURCE_PSQL) -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='source_files'" | grep -q 1 || $(SOURCE_PSQL) -d postgres -c "CREATE DATABASE source_files"
+	@$(SOURCE_PSQL) -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='source_metrics'" | grep -q 1 || $(SOURCE_PSQL) -d postgres -c "CREATE DATABASE source_metrics"
 	@$(PSQL) -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='sink'"   | grep -q 1 || $(PSQL) -d postgres -c "CREATE DATABASE sink"
 	@$(PSQL) -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='monarch_ledger'" | grep -q 1 || $(PSQL) -d postgres -c "CREATE DATABASE monarch_ledger"
 
@@ -32,8 +33,9 @@ databases:
 # on the primary (primary_dsn in fleet.yaml); as catalog objects they replicate physically to
 # the standby where pgoutput reads them.
 schema: databases
-	-uv run python mock_storages/generate_schema.py default attachments | $(SOURCE_PSQL) -d source
+	-uv run python mock_storages/generate_schema.py default attachments crons groupactionlog | $(SOURCE_PSQL) -d source
 	-uv run python mock_storages/generate_schema.py files | $(SOURCE_PSQL) -d source_files
+	-uv run python mock_storages/generate_schema.py performance_metrics metrics | $(SOURCE_PSQL) -d source_metrics
 	-uv run python mock_storages/generate_schema.py | $(PSQL) -d sink
 	$(PSQL) -d monarch_ledger < monarch/migrations/ledger.sql
 
@@ -43,10 +45,12 @@ schema: databases
 # wildly. Runs on the primary (a standby is read-only) and replicates to the standby, where
 # the estimates are computed. Production relies on autoanalyze for the same effect.
 data:
-	uv run python mock_storages/generate_data.py default attachments | $(SOURCE_PSQL) -d source
+	uv run python mock_storages/generate_data.py default attachments crons groupactionlog | $(SOURCE_PSQL) -d source
 	uv run python mock_storages/generate_data.py files | $(SOURCE_PSQL) -d source_files
+	uv run python mock_storages/generate_data.py performance_metrics metrics | $(SOURCE_PSQL) -d source_metrics
 	$(SOURCE_PSQL) -d source -c "ANALYZE"
 	$(SOURCE_PSQL) -d source_files -c "ANALYZE"
+	$(SOURCE_PSQL) -d source_metrics -c "ANALYZE"
 
 # Reset the demo to a blank slate: drop every database and both buckets (rebuild with
 # `make schema data`). Slots on the standby are dropped first: a database can't be
@@ -55,6 +59,7 @@ reset:
 	-$(COMPOSE) exec -T standby psql -U monarch -d postgres -c "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name LIKE 'monarch_%'"
 	$(SOURCE_PSQL) -d postgres -c "DROP DATABASE IF EXISTS source"
 	$(SOURCE_PSQL) -d postgres -c "DROP DATABASE IF EXISTS source_files"
+	$(SOURCE_PSQL) -d postgres -c "DROP DATABASE IF EXISTS source_metrics"
 	$(PSQL) -d postgres -c "DROP DATABASE IF EXISTS sink"
 	$(PSQL) -d postgres -c "DROP DATABASE IF EXISTS monarch_ledger"
 	rm -rf mock_storages/buckets
@@ -79,9 +84,9 @@ ORG ?= 1
 run:
 	trap 'kill 0' SIGINT; \
 	uv run monarch dashboard & \
-	uv run monarch worker --store default     & \
-	uv run monarch worker --store attachments & \
-	uv run monarch worker --store files       & \
+	for store in $$(uv run python -c 'import yaml; f=yaml.safe_load(open("fleet.yaml")); print(" ".join(s for db in f["cells"]["source"]["databases"] for s in db["stores"]))'); do \
+		uv run monarch worker --store $$store & \
+	done; \
 	wait
 
 # register first: create-publication journals its per-store facts into the registered move,

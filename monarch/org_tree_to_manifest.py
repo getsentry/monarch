@@ -24,6 +24,18 @@ OUTPUT_PATH = Path("manifest.generated.yaml")
 STATIC_MODELS = {"sentry.project"}
 # control never moves: its org mappings are backfilled via outboxes, not replicated
 EXCLUDED_STORES = {"control"}
+# Models dropped from the move outright, independent of store.
+#
+# uptime.uptimeresponsecapture: its ONLY path back to the org is a cross-database FK,
+# file_id -> sentry.file (the export records no organization_id/project_id). sentry.file is
+# part of the FileBlob island: it carries no org column of its own -- its per-org membership
+# is *derived* (files pulled in by org-scoped rows like releasefile), not enumerable up front.
+# So there's no sound way for the current machinery to scope the uptime rows: a cross-store
+# scope edge is only legal into a frozen parent, but freezing sentry.file is a lie because
+# read_frozen_ids can't read a per-org id set for a table with no org column. Until the file
+# subtree gets real derived-membership handling (the grow-only blob-ledger model), we simply
+# don't move this table. Revisit when that lands.
+EXCLUDED_MODELS = {"uptime.uptimeresponsecapture"}
 INCLUDE_SPECIAL_FIELDS = True
 BLOB_EVICTION = {
     "filestore": "keep",
@@ -112,6 +124,10 @@ def convert_org_tree(org_tree: dict[str, Any]) -> dict[str, Any]:
         for column, store in external_refs.get(table, []):
             refs[column] = {"blob": store}
 
+        # a self-referential FK is not a scope edge -- a table can't be scoped by itself;
+        # it stays a plain data column (copied with the row), just not recorded as a ref.
+        refs = {column: ref for column, ref in refs.items() if ref.get("parent") != table}
+
         if refs:
             spec["refs"] = refs
         relationships[table] = spec
@@ -122,7 +138,11 @@ def convert_org_tree(org_tree: dict[str, Any]) -> dict[str, Any]:
 def excluded_models(nodes: list[dict[str, Any]], by_model: dict[str, dict[str, Any]]) -> set[str]:
     """Models in EXCLUDED_STORES, plus (transitively) any model whose only scoping ref
     pointed into the excluded set -- such a table can't be walked from the root."""
-    excluded = {node["model_name"] for node in nodes if store_of(node) in EXCLUDED_STORES}
+    excluded = {
+        node["model_name"]
+        for node in nodes
+        if store_of(node) in EXCLUDED_STORES or node["model_name"] in EXCLUDED_MODELS
+    }
     while True:
         orphaned = {
             node["model_name"]

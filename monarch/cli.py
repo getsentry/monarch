@@ -12,7 +12,7 @@ from .membership import BlobMembership
 from .snapshot import Source, derive_membership, estimate_rows, read_frozen_ids, run_snapshot
 from .stream import StreamSource, run_streams
 
-CONFIG = "manifest.yaml"
+CONFIG = "manifest.generated.yaml"
 FLEET = "fleet.yaml"
 
 

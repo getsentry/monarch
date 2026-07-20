@@ -637,8 +637,6 @@ relationships:
     primary_key:
     - id
     refs:
-      blob_id:
-        parent: sentry_fileblob
       path:
         blob: filestore
   sentry_dataforwarderproject:
@@ -1376,9 +1374,6 @@ relationships:
     store: default
     primary_key:
     - id
-    refs:
-      action_id:
-        parent: workflow_engine_action
   sentry_ruleactivity:
     store: default
     primary_key:
@@ -1507,13 +1502,6 @@ relationships:
         parent: sentry_preprodartifact
   sentry_relocationfile:
     store: files
-    primary_key:
-    - id
-    refs:
-      file_id:
-        parent: sentry_file
-  uptime_uptimeresponsecapture:
-    store: default
     primary_key:
     - id
     refs:

@@ -5,8 +5,10 @@
 # colocate), and the demo grants them no same-transaction coupling that split cells lack.
 #
 # The demo's source cell splits one store out to its own database, mirroring the fleet:
-#   default/attachments = the PG16 pair's "source" database (two slots, two movers)
+#   default (+ attachments, crons, groupactionlog)
+#                       = the PG16 pair's "source" database (one slot/mover per store)
 #   files               = the "source_files" database on the same pair
+#   performance_metrics, metrics = the "source_metrics" database on the same pair
 # (monarch reads/decodes everything on the standby)
 #   sink                = the PG14 instance; all stores colocated in the one "sink" database
 cells:
@@ -17,10 +19,13 @@ cells:
       # to the standby, where pgoutput reads them)
       - primary_dsn: host=127.0.0.1 port=5433 user=monarch password=monarch dbname=source
         standby_dsn: host=127.0.0.1 port=5434 user=monarch password=monarch dbname=source
-        stores: [default, attachments]
+        stores: [default, attachments, crons, groupactionlog]
       - primary_dsn: host=127.0.0.1 port=5433 user=monarch password=monarch dbname=source_files
         standby_dsn: host=127.0.0.1 port=5434 user=monarch password=monarch dbname=source_files
         stores: [files]
+      - primary_dsn: host=127.0.0.1 port=5433 user=monarch password=monarch dbname=source_metrics
+        standby_dsn: host=127.0.0.1 port=5434 user=monarch password=monarch dbname=source_metrics
+        stores: [performance_metrics, metrics]
     # blob stores have no slot/stream; the cell just names its bucket (a directory in the demo)
     blobs:
       filestore: { file_path: mock_storages/buckets/filestore/source }
@@ -28,7 +33,7 @@ cells:
   sink:
     databases:
       - primary_dsn: host=127.0.0.1 port=5432 user=monarch password=monarch dbname=sink
-        stores: [default, attachments, files]
+        stores: [default, attachments, files, performance_metrics, metrics, crons, groupactionlog]
     blobs:
       filestore: { file_path: mock_storages/buckets/filestore/sink }
       objectstore: { file_path: mock_storages/buckets/objectstore/sink }
