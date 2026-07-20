@@ -23,12 +23,14 @@ CREATE TABLE IF NOT EXISTS move_unit (
     unit    text   NOT NULL,
     -- the unit's pipe: is data flowing between the cells and does the pipe still exist.
     -- copied = the resting state between snapshot and stream: slot exists, retaining WAL,
-    -- nothing consuming yet. stream_ended is written by teardown (finalize and abort alike)
-    -- as it drops each slot; evicted is the finalize path's last step (source rows + blobs
-    -- deleted), the derived gate the move finalizes on
+    -- nothing consuming yet (stopping the stream returns here). slot_dropped is written by
+    -- teardown (finalize and abort alike) as it drops each slot + its publications -- plumbing
+    -- gone, source rows still present (abort rests here). evicting is the finalize path's
+    -- worker trigger to delete this store's source rows + blobs; evicted is the result, the
+    -- derived gate the move finalizes on
     status  text   NOT NULL DEFAULT 'pending'
         CONSTRAINT move_unit_status_check CHECK (status IN
-            ('pending', 'copying', 'copied', 'streaming', 'stream_ended', 'evicted')),
+            ('pending', 'copying', 'copied', 'streaming', 'slot_dropped', 'evicting', 'evicted')),
     -- the copy denominator, as two write-once facts: the planner's prediction at copy start
     -- (complete but inexact) and the actual at copy completion. UI divides by
     -- COALESCE(total, estimate); display only, nothing gates on either

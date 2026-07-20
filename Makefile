@@ -6,7 +6,7 @@ PSQL := $(COMPOSE) exec -T postgres psql -U monarch -v ON_ERROR_STOP=1 -q
 SOURCE_PSQL := $(COMPOSE) exec -T primary psql -U monarch -v ON_ERROR_STOP=1 -q
 
 .PHONY: up down install databases schema data reset run demo verify snapshot opt-in-group \
-	traffic evict-source evict-sink psql-source psql-standby psql-files psql-sink \
+	traffic evict-sink psql-source psql-standby psql-files psql-sink \
 	psql-ledger
 
 up:
@@ -126,13 +126,11 @@ verify:
 	@$(PSQL) -d sink -c "SELECT 'sink' AS side, left(message, 20) AS message_head, length(message) FROM commit WHERE id = 1"
 
 
-# Eviction (refuses while the org's slots still exist -- a live stream would replicate the
-# deletes to the sink). evict-source = post-cutover cleanup, the org has moved; evict-sink =
-# abort, clearing a failed copy. Control silo untouched. Blobs stay: in production the cell's
-# own GC (Sentry cleanup) reclaims unreferenced bytes; the demo has no such job, so orphans
-# persist until `make reset`.
-evict-source:
-	uv run monarch evict --org-id $(ORG) --cell source
-
+# Source eviction (post-cutover cleanup, the org has moved) is worker-driven now: finalize +
+# evict-source in the dashboard drive it per store. evict-sink = abort cleanup, clearing a
+# failed copy from the sink (what the dashboard's "scrub sink copy" runs); pass the aborted
+# move's id. Control silo untouched. Blobs stay: in production the cell's own GC (Sentry
+# cleanup) reclaims unreferenced bytes; the demo has no such job, so orphans persist until
+# `make reset`.
 evict-sink:
-	uv run monarch evict --org-id $(ORG) --cell sink
+	uv run monarch evict --org-id $(ORG) --cell sink --move-id $(MOVE)

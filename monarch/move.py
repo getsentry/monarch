@@ -36,17 +36,19 @@ class UnitStatus(StrEnum):
     exists and retains WAL, but nothing is consuming -- streaming only when a stream
     actually is. Drain-done is a live comparison of applied against the source head at the
     cut-over attempt, never stored; liveness is heartbeat_at.
-    stream_ended is recorded by teardown (finalize and abort alike) as it drops each slot,
-    do-then-record; pg_replication_slots stays ground truth if they ever disagree. evicted is
-    the finalize path's last step -- the store's source rows and blobs are deleted -- and the
-    move finalizes once every unit reaches it; stream_ended stays terminal on the abort path
-    (the sink scrub is post-terminal cleanup)."""
+    slot_dropped is recorded by teardown (finalize and abort alike) as it drops each slot and
+    its publications, do-then-record; pg_replication_slots stays ground truth if they ever
+    disagree. evicting is the finalize path's next step -- the worker's trigger to delete this
+    store's source rows + blobs, set once teardown is done, like copying/streaming; evicted is
+    the result, and the move finalizes once every unit reaches it. slot_dropped stays terminal
+    on the abort path (the sink scrub is post-terminal cleanup)."""
 
     PENDING = "pending"
     COPYING = "copying"
     COPIED = "copied"
     STREAMING = "streaming"
-    STREAM_ENDED = "stream_ended"
+    SLOT_DROPPED = "slot_dropped"
+    EVICTING = "evicting"
     EVICTED = "evicted"
 
 
@@ -60,7 +62,7 @@ class UnitStatus(StrEnum):
 # back to the source, sink writes since the flip lost) is offered ONLY from cut_over: once
 # evicting starts the source is going away, so there is nothing to revert to. A destination
 # may have several sources only when the transition means the same thing from each (aborted:
-# move dead, org on source; stream_ended: teardown). Gates (writes stopped? every unit caught
+# move dead, org on source; slot_dropped: teardown). Gates (writes stopped? every unit caught
 # up? every unit evicted?) are the caller's conditions for *attempting* a transition; these
 # maps only define which transitions exist.
 MOVE_TRANSITIONS: dict[Phase, set[Phase]] = {
@@ -75,13 +77,16 @@ MOVE_TRANSITIONS: dict[Phase, set[Phase]] = {
 }
 MOVE_UNIT_TRANSITIONS: dict[UnitStatus, set[UnitStatus]] = {
     UnitStatus.PENDING: {UnitStatus.COPYING},
-    UnitStatus.COPYING: {UnitStatus.COPIED, UnitStatus.STREAM_ENDED},  # ended = abort mid-copy
-    UnitStatus.COPIED: {UnitStatus.STREAMING, UnitStatus.STREAM_ENDED},  # ended = abort pre-stream
+    UnitStatus.COPYING: {UnitStatus.COPIED, UnitStatus.SLOT_DROPPED},  # dropped = abort mid-copy
+    UnitStatus.COPIED: {UnitStatus.STREAMING, UnitStatus.SLOT_DROPPED},  # dropped = abort pre-stream
     # back to copied = stop the stream: consumer stops, slot retained (copied's resting
     # meaning), a re-trigger resumes it. copied thus has two sources -- snapshot-done and
     # stream-stopped -- both meaning "slot exists, nothing consuming".
-    UnitStatus.STREAMING: {UnitStatus.STREAM_ENDED, UnitStatus.COPIED},
-    UnitStatus.STREAM_ENDED: {UnitStatus.EVICTED},  # finalize path: source rows + blobs deleted
+    UnitStatus.STREAMING: {UnitStatus.SLOT_DROPPED, UnitStatus.COPIED},
+    # finalize path: evicting is the worker's trigger to delete this store; a blob unit, evicted
+    # as a side effect of its referencing store, is marked evicted directly by that store's worker
+    UnitStatus.SLOT_DROPPED: {UnitStatus.EVICTING, UnitStatus.EVICTED},
+    UnitStatus.EVICTING: {UnitStatus.EVICTED},
     UnitStatus.EVICTED: set(),
 }
 
@@ -165,7 +170,7 @@ class MoveUnit:
 
     def transition(self, to: UnitStatus, note: str | None = None) -> bool:
         """Guarded update of this mover's status; legal sources derive from the map (its
-        multi-source destination, stream_ended, means the same thing from either source).
+        multi-source destination, slot_dropped, means the same thing from either source).
         pending -> copying doubles as the mover's claim: a duplicate mover loses the race
         and gets False."""
         sources = [str(s) for s, dests in MOVE_UNIT_TRANSITIONS.items() if to in dests]

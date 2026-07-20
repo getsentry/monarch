@@ -179,8 +179,12 @@ class Handler(BaseHTTPRequestHandler):
             self._cutover(body)
         elif path == "/finalize":
             self._finalize(body)
-        elif path == "/evict":
-            self._evict(body)
+        elif path == "/evict-source":
+            # like /snapshot and /stream: move the postgres units to the trigger status
+            # (slot_dropped -> evicting) and let each store's worker respond
+            self._transition(body, move.UnitStatus.EVICTING, "evict requested")
+        elif path == "/scrub-sink":
+            self._scrub_sink(body)
         elif path == "/abort":
             self._abort(body)
         else:
@@ -214,10 +218,11 @@ class Handler(BaseHTTPRequestHandler):
         self._respond(200, "application/json", _to_json({"id": m.id}))
 
     def _transition(self, body, target: "move.Phase | move.UnitStatus", note: str) -> None:
-        """The dashboard's whole write side: CAS the requested state into the ledger and let
-        the workers respond. A Phase advances the move; a UnitStatus advances every postgres
-        store's unit to it -- the trigger each worker polls for. `note` is the journal line
-        the transition records, so the feed reads as the operator's intent."""
+        """The dashboard's whole write side: write the requested state into the ledger (a
+        guarded update, only from a legal predecessor) and let the workers respond. A Phase
+        advances the move; a UnitStatus advances every postgres store's unit to it -- the
+        trigger each worker polls for. `note` is the journal line the transition records, so
+        the feed reads as the operator's intent."""
         m = move.Move(self.conn, int(body["move"]))
         if isinstance(target, move.Phase):
             moved = m.transition(target, note=note)
@@ -272,10 +277,11 @@ class Handler(BaseHTTPRequestHandler):
         self._respond(200, "application/json", _to_json({"phase": "cut_over"}))
 
     def _finalize(self, body) -> None:
-        """Finalize's first half: drop the slots + publications, mark each unit stream_ended,
-        and enter `evicting` -- the commit boundary, past which revert is gone. The source
-        copy itself is deleted by the evict step, which closes the move (-> finalized) once
-        every unit is evicted. Teardown runs synchronously; a failure leaves the phase at
+        """Teardown, its own called-out step: drop the slots + publications, mark each unit
+        slot_dropped, and enter `evicting` -- the commit boundary, past which revert is gone
+        (the plumbing is torn down; the source rows are still there). The separate evict step
+        then triggers the workers to delete the source copy, closing the move (-> finalized)
+        once every unit is evicted. Teardown runs synchronously; a failure leaves the phase at
         cut_over for a re-run."""
         try:
             move_id = int(body["move"])
@@ -311,41 +317,30 @@ class Handler(BaseHTTPRequestHandler):
             "SELECT unit FROM move_unit WHERE move_id = %s", (move_id,)
         ).fetchall()
         for (unit,) in units:
-            move.MoveUnit(m, unit).transition(move.UnitStatus.STREAM_ENDED, note="teardown")
-        m.transition(move.Phase.EVICTING, note="slots + publications dropped; evicting the source")
+            move.MoveUnit(m, unit).transition(move.UnitStatus.SLOT_DROPPED, note="teardown")
+        m.transition(move.Phase.EVICTING, note="slots + publications dropped; source copy still present")
         self._respond(200, "application/json", _to_json({"phase": "evicting"}))
 
-    def _evict(self, body) -> None:
-        """The evicting phase's action, spawned like the step commands: an `evicting` move
-        deletes the org's source copy and, once every unit is evicted, closes the move
-        (-> finalized) -- that transition lives in the CLI. An `aborted` move scrubs the
-        partial sink copy (post-terminal cleanup, no phase change). The CLI journals its
-        per-store counts, which the page's gate watches."""
+    def _scrub_sink(self, body) -> None:
+        """Abort's sink scrub: spawn the central evict against the sink to delete the doomed
+        partial copy (post-terminal cleanup, no phase change). The finalize-path source
+        eviction is worker-driven instead -- the /evict-source route just moves the units to
+        `evicting` and each store's worker deletes its own. The CLI journals its per-store
+        counts, which the page's gate watches."""
         try:
             move_id = int(body["move"])
         except (KeyError, TypeError, ValueError):
             self._respond(400, "application/json", _to_json({"error": "expected {move}"}))
             return
         row = self.conn.execute(
-            "SELECT root_id, source_cell, sink_cell, phase FROM move WHERE id = %s", (move_id,)
+            "SELECT root_id, sink_cell, phase FROM move WHERE id = %s", (move_id,)
         ).fetchone()
-        if row is None or row[3] not in ("evicting", "aborted"):
-            self._respond(
-                409, "application/json", _to_json({"error": "needs an evicting or aborted move"})
-            )
+        if row is None or row[2] != "aborted":
+            self._respond(409, "application/json", _to_json({"error": "needs an aborted move"}))
             return
-        cell = row[1] if row[3] == "evicting" else row[2]
         args = [
-            sys.executable,
-            "-m",
-            "monarch.cli",
-            "evict",
-            "--org-id",
-            str(row[0]),
-            "--cell",
-            cell,
-            "--move-id",
-            str(move_id),
+            sys.executable, "-m", "monarch.cli", "evict",
+            "--org-id", str(row[0]), "--cell", row[1], "--move-id", str(move_id),
         ]
         proc = subprocess.Popen(args)
         print(f"{datetime.now():%H:%M:%S} spawned `monarch {' '.join(args[3:])}` (pid {proc.pid})")

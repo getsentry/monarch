@@ -24,17 +24,25 @@ def run_evict(
     graph: Graph,
     root_id: int,
     buckets: dict[str, Bucket],
+    tables: list[str],
 ) -> tuple[dict[str, int], dict[str, int]]:
-    """Scoped deletes across every database in `cell`, children first. Keys are read from the
-    cell itself, so eviction is self-contained and idempotent: a re-run matches nothing.
-    One transaction per database -- atomic per database, not across them (as everywhere).
-    Returns (rows deleted per postgres store, objects deleted per blob store)."""
+    """Delete `tables`' rows (and their delete-eviction blobs) from `cell`, children first. A
+    worker passes its own store's tables, run once the stores referencing it are gone (nothing
+    points at the rows it deletes); the abort sink scrub passes the whole graph. The key scan
+    is graph-wide either way -- a table's predicate needs its parents' keys, which live in
+    tables that delete later (children first) and so are still present. Keys are read from the
+    cell itself, so eviction is self-contained and idempotent: a re-run matches nothing. One
+    transaction per database -- atomic per database, not across them (as everywhere). Returns
+    (rows deleted per postgres store, objects deleted per blob store)."""
     print(f"evict: removing org {root_id} from cell {cell.name}\n")
+    targets = set(tables)
     conn_for = {t: conns[db.primary_dsn] for db in cell.databases for t in db.tables(graph)}
     with ExitStack() as stack:
         for conn in conns.values():
             stack.enter_context(conn.transaction())
 
+        # Scan keys graph-wide (every parent's, wherever it lives) so a target's predicate
+        # resolves; collect predicates only for the tables this call deletes.
         keys: dict[str, list[int]] = {}
         scoped: list[tuple[str, sql.Composable]] = []
         for table in graph.topological_sort():
@@ -46,7 +54,8 @@ def run_evict(
                     sql.Identifier(graph.primary_key_of[table][0]), sql.Identifier(table), pred
                 )
                 keys[table] = [r[0] for r in conn_for[table].execute(select).fetchall()]
-            scoped.append((table, pred))
+            if table in targets:
+                scoped.append((table, pred))
 
         # Objects before rows: a delete-on-eviction store's keys are only recoverable while the
         # rows still name them. A crash in between leaves rows whose objects are gone -- fine

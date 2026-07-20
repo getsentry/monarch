@@ -10,13 +10,16 @@ per store as `monarch worker --store files`; Ctrl-C to stop.
 
 Reactions so far: status `copying` -> create publications, snapshot the store to the sink,
 mark `copied`; status `streaming` -> resume the slot and stream (copying blob bytes too)
-until stop moves the unit back to `copied`. Teardown layers onto the same loop next."""
+until stop moves the unit back to `copied`; status `evicting` (set once teardown has dropped
+the slot, leaving the unit `slot_dropped`) -> delete the store's source rows once its
+referencers are gone, mark `evicted`, and close the move when every unit is."""
 
 import time
 from contextlib import ExitStack, closing
 
 from . import move, slot
-from .blobs import blob_copiers
+from .blobs import Bucket, blob_copiers
+from .cell_eviction import run_evict
 from .config import Cell, Graph, connect
 from .membership import BlobMembership
 from .snapshot import Source, derive_membership, read_frozen_ids, run_snapshot
@@ -30,13 +33,15 @@ def run_worker(store: str, graph: Graph, cells: dict[str, Cell], ledger_dsn: str
     with closing(connect(ledger_dsn)) as book:
         while True:
             m = move.find_live(book)
-            if m is not None and m.phase() is move.Phase.ACTIVE:
-                # dispatch on the requested status (teardown branch layers on next)
-                match move.MoveUnit(m, store).status():
-                    case move.UnitStatus.COPYING:
+            if m is not None:
+                # dispatch on the requested state: the dashboard writes it, the worker responds
+                match (m.phase(), move.MoveUnit(m, store).status()):
+                    case (move.Phase.ACTIVE, move.UnitStatus.COPYING):
                         snapshot(store, m.root_id(), graph, cells, book, m)
-                    case move.UnitStatus.STREAMING:
+                    case (move.Phase.ACTIVE, move.UnitStatus.STREAMING):
                         stream(store, m.root_id(), graph, cells, book, m)
+                    case (move.Phase.EVICTING, move.UnitStatus.EVICTING):
+                        evict(store, m.root_id(), graph, cells, book, m)
                     case _:
                         pass
             time.sleep(POLL_SECONDS)
@@ -118,3 +123,40 @@ def stream(
         units = {store: move.MoveUnit(m, store)} | {b: move.MoveUnit(m, b) for b in blobs}
         run_streams([src], sinks, sink, graph, membership, copiers, blob_members, units)
     print(f"worker[{store}]: stream stopped (slot retained)")
+
+
+def evict(
+    store: str, org_id: int, graph: Graph, cells: dict[str, Cell], book, m: move.Move
+) -> None:
+    """The `evicting` reaction: once every store referencing this one is evicted -- its rows,
+    which hold the foreign keys into ours, are gone -- delete this store's source rows and
+    delete-eviction blobs, then mark it (and its blob units) evicted. Idempotent: a re-run
+    matches nothing. The last unit to finish closes the move."""
+    source = cells[m.cells()[0]]
+    unit = move.MoveUnit(m, store)
+    if not all(
+        move.MoveUnit(m, s).status() is move.UnitStatus.EVICTED
+        for s in graph.stores_referencing(store)
+    ):
+        return  # a referencing store is still holding on; a later poll retries once it's gone
+    blobs = {b for t in graph.store_tables(store) for b in graph.blobs.get(t, {}).values()}
+    with ExitStack() as stack:
+        conns = {
+            db.primary_dsn: stack.enter_context(connect(db.primary_dsn)) for db in source.databases
+        }
+        buckets = {name: Bucket(loc["file_path"]) for name, loc in source.blobs.items()}
+        rows, objects = run_evict(conns, source, graph, org_id, buckets, graph.store_tables(store))
+    unit.add_event(f"evicted from {source.name}: {sum(rows.values())} row(s)")
+    for b, count in objects.items():
+        move.MoveUnit(m, b).add_event(f"evicted from {source.name}: {count} object(s)")
+    unit.transition(move.UnitStatus.EVICTED, note="source evicted")
+    # blob units go with their referencing store; if another referencer already marked one
+    # evicted, this guarded update simply matches nothing -- harmless
+    for b in blobs:
+        move.MoveUnit(m, b).transition(move.UnitStatus.EVICTED, note="source evicted")
+    print(f"worker[{store}]: evicted from {source.name}")
+    done = book.execute(
+        "SELECT bool_and(status = 'evicted') FROM move_unit WHERE move_id = %s", (m.id,)
+    ).fetchone()
+    if done[0]:
+        m.transition(move.Phase.FINALIZED, note="every unit evicted; source gone")

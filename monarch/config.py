@@ -73,6 +73,19 @@ class Graph:
         one mover's territory."""
         return [t for t in self.topological_sort() if self.store_of[t] == store]
 
+    def stores_referencing(self, store: str) -> set[str]:
+        """The other postgres stores whose tables reference one of `store`'s tables -- the
+        stores that must be evicted before it, since their rows hold the foreign keys into it
+        (delete the referencing rows first). Direct referencers only: a transitive chain falls
+        out of each store gating on its own referencers. Empty for a leaf store no one points
+        at, so it evicts first."""
+        return {
+            self.store_of[table]
+            for table, edges in self.edges.items()
+            for edge in edges
+            if self.store_of[edge.parent] == store and self.store_of[table] != store
+        }
+
     def scope_edge(self, table: str) -> Edge | None:
         """The edge scoping `table` to a parent, preferring a static parent (the root or a frozen
         table): its id set can't change mid-move, so it's the cheapest filter and makes the scope

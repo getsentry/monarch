@@ -297,7 +297,8 @@ async function pollMoves() {
 // copy timings come from the journal (transitions carry timestamps; unit rows deliberately
 // don't) -- the full feed replays on load, so these are always reconstructible
 const unitTimes = {};
-// whether the source copy is gone (the move-level event evict journals)
+// whether the abort sink scrub has run (it journals "org evicted from sink"); disarms the
+// scrub button. Source eviction is worker-driven and shows per-store, so it needs no flag here
 let evicted = false;
 // blob stores are units too but hold no slot/publication
 const blobStores = new Set();
@@ -329,7 +330,9 @@ const LAG_FULL = 1 << 20;  // bar full-scale: 1 MB of WAL behind
 const KEYS_FULL = 20;      // blob bar full-scale: pending keys
 
 function streamRow(u) {
-  if (u.status === "stream_ended") return { text: "pipe closed ✓", frac: 0, cls: "hit" };
+  if (u.status === "evicted") return { text: "source copy deleted ✓", frac: 0, cls: "hit" };
+  if (u.status === "evicting") return { text: "evicting source…", frac: 0, cls: "" };
+  if (u.status === "slot_dropped") return { text: "pipe closed ✓", frac: 0, cls: "hit" };
   if (u.status !== "streaming") return { text: "not streaming yet", frac: 0, cls: "" };
   // blob units heartbeat key counts, not LSNs
   if (blobStores.has(u.unit)) {
@@ -531,18 +534,19 @@ const ACTIONS = [
     run: async note => {
       const { ok, status, body } = await post("/finalize", { move: +pinned });
       if (!ok) { note(body.error ?? `failed (${status}) — restart \`monarch dashboard\`?`); return false; }
-      note("evicting — slots + publications dropped; evict the source to close the move");
+      note("evicting — slots + publications dropped; source copy still present, evict it to close the move");
       return true;
     },
     arm: m => !m || m.phase !== "cut_over" ? "needs a cut-over move" : null },
   { label: "evict source copy",
     run: async note => {
-      const { ok, status, body } = await post("/evict", { move: +pinned });
+      const { ok, status, body } = await post("/evict-source", { move: +pinned });
       if (!ok) { note(body.error ?? `failed (${status}) — restart \`monarch dashboard\`?`); return false; }
-      note("evicting source — the move finalizes once every store is evicted");
+      note("evicting source — each store's worker deletes its own rows; the move closes once every store is evicted");
       return true;
     },
-    arm: m => !m || m.phase !== "evicting" ? "needs an evicting move" : null },
+    arm: m => !m || m.phase !== "evicting" ? "needs an evicting move"
+      : !lastUnits.every(u => u.status === "slot_dropped") ? "eviction already underway" : null },
   { label: "abort move", danger: true,
     run: async note => {
       const { ok, status, body } = await post("/abort", { move: +pinned });
@@ -554,7 +558,7 @@ const ACTIONS = [
       : streaming ? "stop the streams first — a unit is still streaming" : null },
   { label: "scrub sink copy",
     run: async note => {
-      const { ok, status, body } = await post("/evict", { move: +pinned });
+      const { ok, status, body } = await post("/scrub-sink", { move: +pinned });
       if (!ok) { note(body.error ?? `failed (${status}) — restart \`monarch dashboard\`?`); return false; }
       note("evict spawned — the journal confirms when the sink's partial copy is gone");
       return true;

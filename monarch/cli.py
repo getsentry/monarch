@@ -200,6 +200,9 @@ def cmd_stream(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: st
 
 
 def cmd_evict(org_id: int, graph: Graph, cell: Cell, ledger_dsn: str, move_id: int) -> None:
+    """Abort's sink scrub: delete the doomed partial copy from the sink in one whole-graph
+    pass, post-terminal cleanup with no phase change. The finalize-path eviction of the source
+    is worker-driven -- each store's worker deletes its own rows and marks its unit evicted."""
     # Refuse while any of the org's slots survive on the cell: a live stream would replicate
     # the eviction to the sink as ordinary deletes (evict.py). Checked per database on the
     # decode endpoint -- slots live where decoding happens.
@@ -217,9 +220,11 @@ def cmd_evict(org_id: int, graph: Graph, cell: Cell, ledger_dsn: str, move_id: i
             db.primary_dsn: stack.enter_context(connect(db.primary_dsn)) for db in cell.databases
         }
         buckets = {name: Bucket(loc["file_path"]) for name, loc in cell.blobs.items()}
-        rows_by_store, blobs_by_store = run_evict(conns, cell, graph, org_id, buckets)
-    # per-store counts on each unit (where store-worker eviction will write them), plus the
-    # move-level completion the dashboard's gate watches
+        rows_by_store, blobs_by_store = run_evict(
+            conns, cell, graph, org_id, buckets, graph.topological_sort()
+        )
+    # journal the per-store counts for the feed; no unit transitions here (abort leaves units
+    # at slot_dropped, the finalize path drives them to evicted in the workers)
     with connect(ledger_dsn) as book:
         m = move.Move(book, move_id)
         for store, rows in rows_by_store.items():
@@ -227,14 +232,6 @@ def cmd_evict(org_id: int, graph: Graph, cell: Cell, ledger_dsn: str, move_id: i
         for store, objects in blobs_by_store.items():
             move.MoveUnit(m, store).add_event(f"evicted from {cell.name}: {objects} object(s)")
         m.add_event(f"org evicted from {cell.name}")
-        # source eviction (the evicting phase) drives every unit to evicted, then the derived
-        # gate -- all units evicted -- closes the move. Abort's sink scrub is post-terminal.
-        if m.phase() is move.Phase.EVICTING:
-            for (unit,) in book.execute(
-                "SELECT unit FROM move_unit WHERE move_id = %s", (move_id,)
-            ).fetchall():
-                move.MoveUnit(m, unit).transition(move.UnitStatus.EVICTED, note="source evicted")
-            m.transition(move.Phase.FINALIZED, note="every unit evicted; source gone")
 
 
 def main() -> None:
