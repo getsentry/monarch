@@ -318,7 +318,10 @@ class Handler(BaseHTTPRequestHandler):
         ).fetchall()
         for (unit,) in units:
             move.MoveUnit(m, unit).transition(move.UnitStatus.SLOT_DROPPED, note="teardown")
-        m.transition(move.Phase.EVICTING, note="slots + publications dropped; source copy still present")
+        m.transition(
+            move.Phase.EVICTING,
+            note="slots + publications dropped; source copy still present",
+        )
         self._respond(200, "application/json", _to_json({"phase": "evicting"}))
 
     def _scrub_sink(self, body) -> None:
