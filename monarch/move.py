@@ -116,9 +116,7 @@ class Move:
     def root_id(self) -> int:
         """The org being moved -- fixed at create(); a store worker reads it from the live
         move rather than being launched pinned to one org."""
-        row = self.conn.execute(
-            "SELECT root_id FROM move WHERE id = %s", (self.id,)
-        ).fetchone()
+        row = self.conn.execute("SELECT root_id FROM move WHERE id = %s", (self.id,)).fetchone()
         assert row is not None
         return row[0]
 

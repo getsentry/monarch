@@ -1,4 +1,5 @@
 import argparse
+import os
 import sys
 from contextlib import ExitStack, closing
 
@@ -12,8 +13,10 @@ from .membership import BlobMembership
 from .snapshot import Source, derive_membership, estimate_rows, read_frozen_ids, run_snapshot
 from .stream import StreamSource, run_streams
 
-CONFIG = "manifest.generated.yaml"
-FLEET = "fleet.yaml"
+# Config paths default to the repo-root files, but both monarch and the mock generators honor
+# these env overrides so a test (e.g. the e2e move test) can point at an isolated fleet.
+CONFIG = os.environ.get("MONARCH_MANIFEST", "manifest.generated.yaml")
+FLEET = os.environ.get("MONARCH_FLEET", "fleet.yaml")
 
 
 def cmd_create_publication(org_id: int, graph: Graph, source: Cell, ledger_dsn: str) -> None:

@@ -6,7 +6,7 @@ import yaml
 from monarch.cli import CONFIG as MANIFEST
 
 CONFIG = os.path.join(os.path.dirname(__file__), "..", MANIFEST)
-FLEET = os.path.join(os.path.dirname(__file__), "..", "fleet.yaml")
+FLEET = os.environ.get("MONARCH_FLEET", os.path.join(os.path.dirname(__file__), "..", "fleet.yaml"))
 
 # table -> {column -> ref}, where ref is {"parent": table} (FK edge) or {"blob": store} (blob key).
 # The root maps to {}.

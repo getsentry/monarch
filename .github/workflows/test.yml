@@ -1,0 +1,16 @@
+name: test
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+      # brings up the isolated fleet (tests/compose.yaml) via docker, runs the e2e move, tears
+      # it down -- docker is preinstalled and running on ubuntu-latest
+      - run: make test

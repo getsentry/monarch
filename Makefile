@@ -7,7 +7,7 @@ SOURCE_PSQL := $(COMPOSE) exec -T source-primary psql -U monarch -v ON_ERROR_STO
 
 .PHONY: up down install databases schema data reset run demo verify snapshot opt-in-group \
 	traffic evict-sink psql-source psql-standby psql-files psql-sink \
-	psql-ledger mock-schema
+	psql-ledger mock-schema test
 
 up:
 	$(COMPOSE) up -d
@@ -17,6 +17,12 @@ down:
 
 install:
 	uv sync
+
+# End-to-end move test: spins up its own isolated fleet (tests/compose.yaml, own project +
+# ports), applies the mock schema/data, runs a real move via the CLI, asserts it landed in the
+# sink. Independent of `make up`/the dev stack; requires docker. See tests/.
+test:
+	uv run pytest tests/ -v
 
 # The fleet's databases (fleet.yaml): source + source_files + source_metrics on the pair, sink + monarch_ledger
 # on the pg14 instance (the ledger = monarch's own move state; colocation is demo convenience,

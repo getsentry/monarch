@@ -8,6 +8,13 @@ from .utils import trust_sql
 from .membership import BlobMembership, Membership
 
 
+class UnscopableTable(Exception):
+    """A table has a scope edge but following it never reaches the root organization, so monarch
+    can't derive an org filter for it and can't move it yet -- e.g. the content-addressed files
+    store, whose blobs are shared across organizations with no foreign key tying one to a single
+    org. Raised in place of a broken predicate."""
+
+
 @dataclass
 class Source:
     """One store's pinned read (the store is the mover unit; colocated stores hold separate
@@ -46,7 +53,10 @@ def estimate_predicate(
     nested semi-joins for dynamic chains so the planner estimates the fanout upfront --
     estimating needs no parent ids, only statistics. Dynamic chains never cross databases
     (config.validate forbids cross-store dynamic scope edges), so the subquery always runs.
-    None = not org-scoped; the walk doesn't copy it either."""
+    None = not org-scoped; the walk doesn't copy it either. A table WITH a scope edge whose chain
+    never reaches the root -- its parent has no path back to an organization, so the recursion
+    returns None -- can't be filtered: raise UnscopableTable rather than emit a broken `WHERE None`.
+    estimate_rows runs before any copy, so this is the one place an unscopable store is refused."""
     if table == graph.root:
         return f"{graph.primary_key_of[table][0]} = {org_id}"
     if (edge := graph.scope_edge(table)) is None:
@@ -57,6 +67,11 @@ def estimate_predicate(
         ids = frozen_ids[edge.parent]
         return f"{edge.column} IN ({', '.join(map(str, ids))})" if ids else "false"
     inner = estimate_predicate(graph, edge.parent, org_id, frozen_ids)
+    if inner is None:
+        raise UnscopableTable(
+            f"{table}: scope edge {edge.column} -> {edge.parent!r} has no path to the root "
+            f"{graph.root!r} -- monarch can't derive an org filter for it"
+        )
     parent_key = graph.primary_key_of[edge.parent][0]
     return f'{edge.column} IN (SELECT {parent_key} FROM "{edge.parent}" WHERE {inner})'
 

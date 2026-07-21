@@ -1,0 +1,28 @@
+# Fleet for the e2e move test (tests/compose.yaml): same shape as the repo-root fleet.yaml,
+# pointed at the isolated stack's ports (sink 5542, source-primary 5543, source-standby 5544)
+# and a scratch bucket dir the fixture cleans. monarch picks this up via MONARCH_FLEET.
+cells:
+  source:
+    databases:
+      - primary_dsn: host=127.0.0.1 port=5543 user=monarch password=monarch dbname=source
+        standby_dsn: host=127.0.0.1 port=5544 user=monarch password=monarch dbname=source
+        stores: [default, attachments, crons, groupactionlog]
+      - primary_dsn: host=127.0.0.1 port=5543 user=monarch password=monarch dbname=source_files
+        standby_dsn: host=127.0.0.1 port=5544 user=monarch password=monarch dbname=source_files
+        stores: [files]
+      - primary_dsn: host=127.0.0.1 port=5543 user=monarch password=monarch dbname=source_metrics
+        standby_dsn: host=127.0.0.1 port=5544 user=monarch password=monarch dbname=source_metrics
+        stores: [performance_metrics, metrics]
+    blobs:
+      filestore: { file_path: tests/.e2e-buckets/filestore/source }
+      objectstore: { file_path: tests/.e2e-buckets/objectstore/source }
+  sink:
+    databases:
+      - primary_dsn: host=127.0.0.1 port=5542 user=monarch password=monarch dbname=sink
+        stores: [default, attachments, files, performance_metrics, metrics, crons, groupactionlog]
+    blobs:
+      filestore: { file_path: tests/.e2e-buckets/filestore/sink }
+      objectstore: { file_path: tests/.e2e-buckets/objectstore/sink }
+
+ledger:
+  dsn: host=127.0.0.1 port=5542 user=monarch password=monarch dbname=monarch_ledger

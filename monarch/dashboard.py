@@ -193,7 +193,7 @@ class Handler(BaseHTTPRequestHandler):
     def _register(self, body) -> None:
         try:
             org, source, sink = int(body["org"]), self.cells[body["from"]], self.cells[body["to"]]
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             self._respond(
                 400,
                 "application/json",
@@ -243,7 +243,7 @@ class Handler(BaseHTTPRequestHandler):
         with nothing moving, so the sink is already at its final pre-flip state."""
         try:
             move_id = int(body["move"])
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             self._respond(400, "application/json", _to_json({"error": "expected {move}"}))
             return
         # every unit must have streamed (heartbeat_at set -- only run_streams writes it, and it
@@ -285,7 +285,7 @@ class Handler(BaseHTTPRequestHandler):
         cut_over for a re-run."""
         try:
             move_id = int(body["move"])
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             self._respond(400, "application/json", _to_json({"error": "expected {move}"}))
             return
         row = self.conn.execute(
@@ -297,7 +297,14 @@ class Handler(BaseHTTPRequestHandler):
         org, source = row[0], row[1]
         for command in ("drop-slot", "drop-publication"):
             args = [
-                sys.executable, "-m", "monarch.cli", command, "--org-id", str(org), "--from", source
+                sys.executable,
+                "-m",
+                "monarch.cli",
+                command,
+                "--org-id",
+                str(org),
+                "--from",
+                source,
             ]
             print(f"{datetime.now():%H:%M:%S} running `monarch {' '.join(args[3:])}`")
             if subprocess.run(args).returncode != 0:
@@ -332,7 +339,7 @@ class Handler(BaseHTTPRequestHandler):
         counts, which the page's gate watches."""
         try:
             move_id = int(body["move"])
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             self._respond(400, "application/json", _to_json({"error": "expected {move}"}))
             return
         row = self.conn.execute(
@@ -342,8 +349,16 @@ class Handler(BaseHTTPRequestHandler):
             self._respond(409, "application/json", _to_json({"error": "needs an aborted move"}))
             return
         args = [
-            sys.executable, "-m", "monarch.cli", "evict",
-            "--org-id", str(row[0]), "--cell", row[1], "--move-id", str(move_id),
+            sys.executable,
+            "-m",
+            "monarch.cli",
+            "evict",
+            "--org-id",
+            str(row[0]),
+            "--cell",
+            row[1],
+            "--move-id",
+            str(move_id),
         ]
         proc = subprocess.Popen(args)
         print(f"{datetime.now():%H:%M:%S} spawned `monarch {' '.join(args[3:])}` (pid {proc.pid})")
@@ -352,7 +367,7 @@ class Handler(BaseHTTPRequestHandler):
     def _abort(self, body) -> None:
         try:
             move_id = int(body["move"])
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             self._respond(400, "application/json", _to_json({"error": "expected {move}"}))
             return
         if move.Move(self.conn, move_id).transition(move.Phase.ABORTED, note="operator abort"):

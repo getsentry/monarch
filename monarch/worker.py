@@ -84,7 +84,12 @@ def snapshot(
             _, snap = stack.enter_context(slot.create_slot(src_db.decode_dsn, name))
             sconn = stack.enter_context(connect(src_db.decode_dsn))
         _, copied = run_snapshot(
-            [Source(store, sconn, snap)], sinks, sink, graph, org_id, blob_members,
+            [Source(store, sconn, snap)],
+            sinks,
+            sink,
+            graph,
+            org_id,
+            blob_members,
             static_keys=static_keys,
         )
         rows = sum(copied.values())

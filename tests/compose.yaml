@@ -1,0 +1,66 @@
+# Isolated fleet for the e2e move test: same topology as the dev compose.yaml (pg14 sink +
+# pg16 source primary/standby pair) but on its own project name and ports, with no named
+# volumes so teardown (`down -v`) is total. Started/stopped by tests/conftest.py. Paths are
+# relative to this file's directory (tests/), hence the `../pg16` mount.
+name: monarch-e2e
+
+services:
+  sink:
+    image: postgres:14
+    command: ["postgres", "-c", "wal_level=logical"]
+    environment:
+      POSTGRES_USER: monarch
+      POSTGRES_PASSWORD: monarch
+      POSTGRES_DB: postgres
+    ports:
+      - "5542:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U monarch"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  source-primary:
+    image: postgres:16
+    command: ["postgres", "-c", "wal_level=logical"]
+    environment:
+      POSTGRES_USER: monarch
+      POSTGRES_PASSWORD: monarch
+      POSTGRES_DB: postgres
+    volumes:
+      - ../pg16/init-replication.sh:/docker-entrypoint-initdb.d/init-replication.sh
+    ports:
+      - "5543:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U monarch"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  source-standby:
+    image: postgres:16
+    user: postgres
+    depends_on:
+      source-primary: { condition: service_healthy }
+    entrypoint:
+      - bash
+      - -ec
+      - |
+        if [ ! -s "$$PGDATA/PG_VERSION" ]; then
+          until pg_basebackup -h source-primary -U monarch -D "$$PGDATA" -R -X stream; do
+            echo "waiting for source-primary..."; sleep 2
+          done
+        fi
+        chmod 0700 "$$PGDATA"
+        exec postgres -c wal_level=logical -c hot_standby_feedback=on \
+          -c max_standby_streaming_delay=6h
+    environment:
+      PGDATA: /var/lib/postgresql/data
+      PGPASSWORD: monarch
+    ports:
+      - "5544:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U monarch"]
+      interval: 1s
+      timeout: 3s
+      retries: 30

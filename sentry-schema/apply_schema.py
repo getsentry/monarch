@@ -45,9 +45,7 @@ def store_by_table() -> dict[str, str]:
 
 
 def connect(host: str, port: int, dbname: str) -> psycopg2.extensions.connection:
-    conn = psycopg2.connect(
-        host=host, port=port, dbname=dbname, user="monarch", password="monarch"
-    )
+    conn = psycopg2.connect(host=host, port=port, dbname=dbname, user="monarch", password="monarch")
     conn.autocommit = True
     return conn
 
