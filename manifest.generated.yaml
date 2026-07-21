@@ -632,13 +632,6 @@ relationships:
     refs:
       organization_id:
         parent: sentry_organization
-  sentry_fileblob:
-    store: files
-    primary_key:
-    - id
-    refs:
-      path:
-        blob: filestore
   sentry_dataforwarderproject:
     store: default
     primary_key:
@@ -1347,22 +1340,6 @@ relationships:
     refs:
       data_export_id:
         parent: sentry_exporteddata
-  sentry_file:
-    store: files
-    primary_key:
-    - id
-    refs:
-      blob_id:
-        parent: sentry_fileblob
-      path:
-        blob: filestore
-  sentry_fileblobindex:
-    store: files
-    primary_key:
-    - id
-    refs:
-      blob_id:
-        parent: sentry_fileblob
   sentry_snubaqueryeventtype:
     store: default
     primary_key:
@@ -1370,10 +1347,6 @@ relationships:
     refs:
       snuba_query_id:
         parent: sentry_snubaquery
-  workflow_engine_action:
-    store: default
-    primary_key:
-    - id
   sentry_ruleactivity:
     store: default
     primary_key:
@@ -1500,13 +1473,6 @@ relationships:
     refs:
       preprod_artifact_id:
         parent: sentry_preprodartifact
-  sentry_relocationfile:
-    store: files
-    primary_key:
-    - id
-    refs:
-      file_id:
-        parent: sentry_file
   seer_projectrepositorybranchoverride:
     store: default
     primary_key:

@@ -4,6 +4,7 @@ for what `make databases` / `make mock-schema` / `make data` do, pointed at the 
 test drives the `monarch` CLI against this fleet, pointing MONARCH_FLEET at it per call.
 """
 
+import os
 import shutil
 import subprocess
 import time
@@ -53,12 +54,14 @@ def _psql(service: str, dbname: str, sql: str) -> None:
 
 
 def _generate(script: str, stores: list[str]) -> str:
-    """Run a mock generator and return its SQL (no store args = all stores)."""
+    """Run a mock generator and return its SQL (no store args = all stores). MONARCH_FLEET points
+    generate_data at this stack's databases -- it introspects the live schema to seed it."""
     out = subprocess.run(
         ["uv", "run", "python", f"mock_storages/{script}", *stores],
         cwd=REPO_ROOT,
         check=True,
         capture_output=True,
+        env={**os.environ, "MONARCH_FLEET": str(REPO_ROOT / FLEET_REL)},
     )
     return out.stdout.decode()
 

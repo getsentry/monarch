@@ -35,7 +35,22 @@ EXCLUDED_STORES = {"control"}
 # read_frozen_ids can't read a per-org id set for a table with no org column. Until the file
 # subtree gets real derived-membership handling (the grow-only blob-ledger model), we simply
 # don't move this table. Revisit when that lands.
-EXCLUDED_MODELS = {"uptime.uptimeresponsecapture"}
+#
+# workflow_engine.action: reverse-scoped only. Its lone outbound reference is a nullable
+# HybridCloudForeignKey to the control-silo sentry.integration, so it has no forward path to the
+# org -- the org tree reaches it purely via a "references" edge (org-scoped rows like
+# workflow_engine.dataconditiongroupaction point *at* it). The current machinery only walks
+# root -> children, so it can't derive which action rows belong to the org. Dropping it here makes
+# clone_and_prune CASCADE-drop the inbound foreign keys too, so the referencing rows move as plain
+# data (their action_id becomes an ordinary column). Revisit when reverse-edge scoping is supported.
+#
+# sentry.fileblob: the FileBlob island root -- a content-addressed blob store shared across orgs,
+# with no org column of its own (see the uptime note above). Everything unscopable descends from
+# it: sentry.file (blob_id -> fileblob), sentry.fileblobindex (blob_id -> fileblob), and
+# sentry.relocationfile (file_id -> file) all fall out via the orphan cascade below. Excluding the
+# root CASCADE-drops the inbound foreign keys, so the org-scoped tables that point at files
+# (artifactbundle, releasefile, ...) still move, carrying file_id as a plain column.
+EXCLUDED_MODELS = {"uptime.uptimeresponsecapture", "workflow_engine.action", "sentry.fileblob"}
 INCLUDE_SPECIAL_FIELDS = True
 BLOB_EVICTION = {
     "filestore": "keep",
