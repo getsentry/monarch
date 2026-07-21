@@ -1,5 +1,5 @@
 services:
-  postgres:
+  sink:
     image: postgres:14 # mirrors Sentry's major version; pgoutput decoding is built in
     command: ["postgres", "-c", "wal_level=logical"] # required for logical replication / CDC
     environment:
@@ -9,10 +9,15 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - sink_data:/var/lib/postgresql/data
+    healthcheck: # gates sentry-migrate: don't start it until Postgres actually answers
+      test: ["CMD-SHELL", "pg_isready -U monarch"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
 
   # PG 16+ is required for logical decoding on a standby. This avoids adding load on the primary.
-  primary:
+  source-primary:
     image: postgres:16
     command: ["postgres", "-c", "wal_level=logical"]
     environment:
@@ -20,16 +25,21 @@ services:
       POSTGRES_PASSWORD: monarch
       POSTGRES_DB: postgres
     volumes:
-      - pg16_primary:/var/lib/postgresql/data
+      - source_primary_data:/var/lib/postgresql/data
       - ./pg16/init-replication.sh:/docker-entrypoint-initdb.d/init-replication.sh
     ports:
       - "5433:5432"
+    healthcheck: # gates sentry-migrate: don't start it until Postgres actually answers
+      test: ["CMD-SHELL", "pg_isready -U monarch"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
 
-  standby:
+  source-standby:
     image: postgres:16
     user: postgres
     depends_on:
-      - primary
+      - source-primary
     # base-backup the primary on first boot, then run as a hot standby.
     # wal_level=logical is required on the standby too for decode-on-standby;
     # hot_standby_feedback stops primary vacuum from invalidating standby slots.
@@ -38,8 +48,8 @@ services:
       - -ec
       - |
         if [ ! -s "$$PGDATA/PG_VERSION" ]; then
-          until pg_basebackup -h primary -U monarch -D "$$PGDATA" -R -X stream; do
-            echo "waiting for primary..."; sleep 2
+          until pg_basebackup -h source-primary -U monarch -D "$$PGDATA" -R -X stream; do
+            echo "waiting for source-primary..."; sleep 2
           done
         fi
         chmod 0700 "$$PGDATA"  # volume mounts can loosen the mode; postgres refuses > 0750
@@ -49,11 +59,29 @@ services:
       PGDATA: /var/lib/postgresql/data
       PGPASSWORD: monarch
     volumes:
-      - pg16_standby:/var/lib/postgresql/data
+      - source_standby_data:/var/lib/postgresql/data
     ports:
       - "5434:5432"
 
+  # One-shot: builds real Sentry at a pinned revision (sentry-schema/Dockerfile), then
+  # applies its real schema across every fleet database -- each store's tables on the
+  # database fleet.yaml assigns it, for both cells (see sentry-schema/apply_schema.py).
+  # Run via `make real-schema`. Behind a profile so `make up` never starts it. Override the
+  # revision with SENTRY_REF=<sha>.
+  sentry-migrate:
+    build:
+      context: ./sentry-schema
+      args:
+        SENTRY_REF: ${SENTRY_REF:-c310f09830044dae87d3e456785eaee9186bbc81}
+    depends_on:
+      sink: { condition: service_healthy }
+      source-primary: { condition: service_healthy }
+    volumes:
+      - ./fleet.yaml:/monarch/fleet.yaml:ro
+      - ./manifest.generated.yaml:/monarch/manifest.generated.yaml:ro
+    profiles: ["sentry-schema"]
+
 volumes:
-  pgdata:
-  pg16_primary:
-  pg16_standby:
+  sink_data:
+  source_primary_data:
+  source_standby_data:

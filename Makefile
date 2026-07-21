@@ -1,13 +1,13 @@
 COMPOSE := docker compose
-# per-instance psql helpers: pg14 = the sink cell (also the legacy rust fixture's home);
-# primary = the source cell's PG16 pair (objects created here replicate physically to the
-# standby, where monarch reads)
-PSQL := $(COMPOSE) exec -T postgres psql -U monarch -v ON_ERROR_STOP=1 -q
-SOURCE_PSQL := $(COMPOSE) exec -T primary psql -U monarch -v ON_ERROR_STOP=1 -q
+# per-instance psql helpers: sink = the pg14 sink cell (also the legacy rust fixture's home);
+# source-primary = the source cell's PG16 primary (objects created here replicate physically
+# to the source-standby, where monarch reads)
+PSQL := $(COMPOSE) exec -T sink psql -U monarch -v ON_ERROR_STOP=1 -q
+SOURCE_PSQL := $(COMPOSE) exec -T source-primary psql -U monarch -v ON_ERROR_STOP=1 -q
 
 .PHONY: up down install databases schema data reset run demo verify snapshot opt-in-group \
 	traffic evict-sink psql-source psql-standby psql-files psql-sink \
-	psql-ledger
+	psql-ledger real-schema
 
 up:
 	$(COMPOSE) up -d
@@ -56,7 +56,7 @@ data:
 # `make schema data`). Slots on the standby are dropped first: a database can't be
 # dropped while a logical slot targets it.
 reset:
-	-$(COMPOSE) exec -T standby psql -U monarch -d postgres -c "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name LIKE 'monarch_%'"
+	-$(COMPOSE) exec -T source-standby psql -U monarch -d postgres -c "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name LIKE 'monarch_%'"
 	$(SOURCE_PSQL) -d postgres -c "DROP DATABASE IF EXISTS source"
 	$(SOURCE_PSQL) -d postgres -c "DROP DATABASE IF EXISTS source_files"
 	$(SOURCE_PSQL) -d postgres -c "DROP DATABASE IF EXISTS source_metrics"
@@ -65,15 +65,15 @@ reset:
 	rm -rf mock_storages/buckets
 
 psql-source:
-	$(COMPOSE) exec primary psql -U monarch -d source
+	$(COMPOSE) exec source-primary psql -U monarch -d source
 psql-standby:
-	$(COMPOSE) exec standby psql -U monarch -d source
+	$(COMPOSE) exec source-standby psql -U monarch -d source
 psql-files:
-	$(COMPOSE) exec primary psql -U monarch -d source_files
+	$(COMPOSE) exec source-primary psql -U monarch -d source_files
 psql-sink:
-	$(COMPOSE) exec postgres psql -U monarch -d sink
+	$(COMPOSE) exec sink psql -U monarch -d sink
 psql-ledger:
-	$(COMPOSE) exec postgres psql -U monarch -d monarch_ledger
+	$(COMPOSE) exec sink psql -U monarch -d monarch_ledger
 
 ORG ?= 1
 # Run the whole app at once: the dashboard (coordinator) plus one worker per source postgres
@@ -101,6 +101,14 @@ snapshot:
 # beside the dashboard: stop stream while this runs = lag climbs; restart = catch-up.
 traffic:
 	PYTHONUNBUFFERED=1 uv run python mock_storages/traffic.py
+
+# Build real Sentry at a pinned revision and apply its real schema across every fleet
+# database -- each store's tables on the database fleet.yaml assigns it, both cells (the
+# real-schema counterpart to `make schema`). Reproducible from nothing (no local Sentry
+# checkout). Recreates the cell databases. Override the revision with
+# `make real-schema SENTRY_REF=<sha>`. See sentry-schema/README.md.
+real-schema:
+	$(COMPOSE) run --rm --build sentry-migrate
 
 # Opt one update-heavy table into update/delete filtering for demo
 opt-in-group:
