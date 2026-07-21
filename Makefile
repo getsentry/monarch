@@ -7,7 +7,7 @@ SOURCE_PSQL := $(COMPOSE) exec -T source-primary psql -U monarch -v ON_ERROR_STO
 
 .PHONY: up down install databases schema data reset run demo verify snapshot opt-in-group \
 	traffic evict-sink psql-source psql-standby psql-files psql-sink \
-	psql-ledger real-schema
+	psql-ledger mock-schema
 
 up:
 	$(COMPOSE) up -d
@@ -28,11 +28,11 @@ databases:
 	@$(PSQL) -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='sink'"   | grep -q 1 || $(PSQL) -d postgres -c "CREATE DATABASE sink"
 	@$(PSQL) -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='monarch_ledger'" | grep -q 1 || $(PSQL) -d postgres -c "CREATE DATABASE monarch_ledger"
 
-# Each source database gets only its stores' tables, mirroring fleet.yaml; the sink colocates
-# every store so it gets them all. Publications are per-org and created by `monarch snapshot`
-# on the primary (primary_dsn in fleet.yaml); as catalog objects they replicate physically to
-# the standby where pgoutput reads them.
-schema: databases
+# The lightweight mock schema: toy tables per store, fast, no Sentry build. Superseded by the
+# real `make schema`; kept as a fallback while the real-schema data/demo path catches up. Each
+# source database gets only its stores' tables, mirroring fleet.yaml; the sink colocates every
+# store so it gets them all.
+mock-schema: databases
 	-uv run python mock_storages/generate_schema.py default attachments crons groupactionlog | $(SOURCE_PSQL) -d source
 	-uv run python mock_storages/generate_schema.py files | $(SOURCE_PSQL) -d source_files
 	-uv run python mock_storages/generate_schema.py performance_metrics metrics | $(SOURCE_PSQL) -d source_metrics
@@ -53,7 +53,7 @@ data:
 	$(SOURCE_PSQL) -d source_metrics -c "ANALYZE"
 
 # Reset the demo to a blank slate: drop every database and both buckets (rebuild with
-# `make schema data`). Slots on the standby are dropped first: a database can't be
+# `make mock-schema data`). Slots on the standby are dropped first: a database can't be
 # dropped while a logical slot targets it.
 reset:
 	-$(COMPOSE) exec -T source-standby psql -U monarch -d postgres -c "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name LIKE 'monarch_%'"
@@ -79,7 +79,7 @@ ORG ?= 1
 # Run the whole app at once: the dashboard (coordinator) plus one worker per source postgres
 # store (the movers that respond to the status the dashboard writes). Each worker picks up
 # whatever move is live, so any org registered from the dashboard is handled -- no org is
-# baked in here. `make up schema data` first, then `make run`, then register + snapshot from
+# baked in here. `make up mock-schema data` first, then `make run`, then register + snapshot from
 # the dashboard. Ctrl-C stops all of them.
 run:
 	trap 'kill 0' SIGINT; \
@@ -102,13 +102,15 @@ snapshot:
 traffic:
 	PYTHONUNBUFFERED=1 uv run python mock_storages/traffic.py
 
-# Build real Sentry at a pinned revision and apply its real schema across every fleet
-# database -- each store's tables on the database fleet.yaml assigns it, both cells (the
-# real-schema counterpart to `make schema`). Reproducible from nothing (no local Sentry
-# checkout). Recreates the cell databases. Override the revision with
-# `make real-schema SENTRY_REF=<sha>`. See sentry-schema/README.md.
-real-schema:
+# The default schema: build real Sentry at a pinned revision and apply its real schema across
+# every fleet database -- each store's tables on the database fleet.yaml assigns it, both cells.
+# Reproducible from nothing (no local Sentry checkout). Recreates the cell databases; the
+# migration leaves monarch_ledger alone, so set that up here too. Override the revision with
+# `make schema SENTRY_REF=<sha>`. See sentry-schema/README.md. (`make mock-schema` = toy schema.)
+schema:
 	$(COMPOSE) run --rm --build sentry-migrate
+	@$(PSQL) -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='monarch_ledger'" | grep -q 1 || $(PSQL) -d postgres -c "CREATE DATABASE monarch_ledger"
+	$(PSQL) -d monarch_ledger < monarch/migrations/ledger.sql
 
 # Opt one update-heavy table into update/delete filtering for demo
 opt-in-group:

@@ -174,11 +174,15 @@ the sink as ordinary deletes.
 ```sh
 make up          # start Postgres (PG16 primary+standby source pair, PG14 sink)
 make install     # install python deps (uv)
-make schema      # create the fleet's databases, schema, and the move ledger
+make mock-schema # create the fleet's databases, schema, and the move ledger
 make data        # seed the source cell with two orgs (evil-corp, other)
 
 make snapshot                     # register + create publications + snapshot org 1
 uv run monarch dashboard          # watch the move at http://localhost:8008
 make traffic                      # trickle writes into the source so the stream has work
 ```
+
+`make schema` applies Sentry's **real** schema instead (see `sentry-schema/`). The `data`/demo
+flow above still targets the mock schema, so use `make mock-schema` for this walkthrough until
+the real-schema data path lands.
 

@@ -66,7 +66,7 @@ services:
   # One-shot: builds real Sentry at a pinned revision (sentry-schema/Dockerfile), then
   # applies its real schema across every fleet database -- each store's tables on the
   # database fleet.yaml assigns it, for both cells (see sentry-schema/apply_schema.py).
-  # Run via `make real-schema`. Behind a profile so `make up` never starts it. Override the
+  # Run via `make schema`. Behind a profile so `make up` never starts it. Override the
   # revision with SENTRY_REF=<sha>.
   sentry-migrate:
     build:
