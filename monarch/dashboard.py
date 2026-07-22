@@ -419,9 +419,11 @@ class Handler(BaseHTTPRequestHandler):
             )
 
 
-def run_dashboard(conn: Connection, port: int, graph: Graph, cells: dict[str, Cell]) -> None:
+def run_dashboard(
+    conn: Connection, port: int, graph: Graph, cells: dict[str, Cell], host: str = "127.0.0.1"
+) -> None:
     """Single-threaded on purpose: one shared ledger connection, one polling client."""
     topology = describe_topology(graph, cells)
-    server = HTTPServer(("127.0.0.1", port), partial(Handler, conn, topology, graph, cells))
-    print(f"dashboard: http://127.0.0.1:{port}")
+    server = HTTPServer((host, port), partial(Handler, conn, topology, graph, cells))
+    print(f"dashboard: http://{host}:{port}")
     server.serve_forever()

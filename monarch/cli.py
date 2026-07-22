@@ -281,6 +281,7 @@ def main() -> None:
     )
     p = sub.add_parser("dashboard", help="Serve the demo dashboard")
     p.add_argument("--port", type=int, default=8008)
+    p.add_argument("--host", default="127.0.0.1", help="bind address; 0.0.0.0 to serve behind a Service")
     args = parser.parse_args()
 
     graph, cells, ledger_dsn = load_config(CONFIG, FLEET)
@@ -319,7 +320,7 @@ def main() -> None:
         case "dashboard":
             with connect(ledger_dsn) as conn:
                 try:
-                    dashboard.run_dashboard(conn, args.port, graph, cells)
+                    dashboard.run_dashboard(conn, args.port, graph, cells, args.host)
                 except KeyboardInterrupt:
                     pass
 
