@@ -17,7 +17,7 @@ import psycopg2.extras
 from psycopg import Connection
 from psycopg2.extras import LogicalReplicationConnection
 
-from .config import Graph
+from .config import Cell, Graph, connect
 from .utils import trust_sql
 
 
@@ -225,3 +225,25 @@ def _drop_best_effort(dsn: str, name: str) -> None:
 def drop_replication_slot(conn: Connection, name: str) -> None:
     """Drop the slot after cutover so retained WAL can be reclaimed."""
     conn.execute("SELECT pg_drop_replication_slot(%s)", (name,))
+
+
+def drop_org_slots(cell: Cell, org_id: int) -> None:
+    """Drop every slot the org holds on a cell (one per store), on each database's decode
+    endpoint -- slots live where decoding happens. The teardown after cutover, or to abort."""
+    for db in cell.databases:
+        with connect(db.decode_dsn) as conn:
+            for store in db.stores:
+                name = slot_name(org_id, store)
+                drop_replication_slot(conn, name)
+                print(f"slot {name} dropped")
+
+
+def drop_org_publications(cell: Cell, org_id: int) -> None:
+    """Drop every publication the org holds on a cell (a pair per store), on each database's
+    primary. Run after drop_org_slots -- publications outlive the slots that read them."""
+    for db in cell.databases:
+        with connect(db.primary_dsn) as admin:
+            for store in db.stores:
+                for name in publication_names(org_id, store):
+                    drop_publication(admin, name)
+                    print(f"publication {name} dropped on {db.dbname}")

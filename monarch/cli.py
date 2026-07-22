@@ -2,8 +2,10 @@ import argparse
 import os
 import sys
 from contextlib import ExitStack, closing
+from pathlib import Path
 
 import psycopg
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from . import dashboard, move, slot, worker
 from .blobs import Bucket, blob_copiers
@@ -12,6 +14,7 @@ from .cell_eviction import run_evict
 from .membership import BlobMembership
 from .snapshot import Source, derive_membership, estimate_rows, read_frozen_ids, run_snapshot
 from .stream import StreamSource, run_streams
+from .utils import trust_sql
 
 # Config paths default to the repo-root files, but both monarch and the mock generators honor
 # these env overrides so a test (e.g. the e2e move test) can point at an isolated fleet.
@@ -58,6 +61,34 @@ def cmd_create_publication(org_id: int, graph: Graph, source: Cell, ledger_dsn: 
                     move.MoveUnit(m, store).add_event(
                         f"publications created: {names} on {db.dbname}"
                     )
+
+
+LEDGER_SQL = Path(__file__).parent / "migrations" / "ledger.sql"
+LEDGER_TABLES = ["move_event", "blob_key", "move_unit", "move"]  # children first
+
+
+def cmd_init_ledger(ledger_dsn: str, reset: bool) -> None:
+    # Bootstrap monarch's own state store: create the ledger database if absent, then apply
+    # its schema (all CREATE ... IF NOT EXISTS, so re-running is a no-op). --reset clears move
+    # state for a fresh demo run. CREATE DATABASE can't run inside a transaction, hence the
+    # autocommit connect(); it also can't run while connected to the target, so create from the
+    # server's default `postgres` database.
+    info = conninfo_to_dict(ledger_dsn)
+    dbname = info["dbname"]
+    server_dsn = make_conninfo(ledger_dsn, dbname="postgres")
+
+    with closing(connect(server_dsn)) as server:
+        exists = server.execute("SELECT 1 FROM pg_database WHERE datname = %s", [dbname]).fetchone()
+        if not exists:
+            server.execute(trust_sql(f'CREATE DATABASE "{dbname}"'))
+            print(f"created database {dbname}")
+
+    with closing(connect(ledger_dsn)) as book:
+        book.execute(trust_sql(LEDGER_SQL.read_text()))
+        print(f"applied schema to {dbname}")
+        if reset:
+            book.execute(trust_sql(f"TRUNCATE {', '.join(LEDGER_TABLES)}"))
+            print("reset move state")
 
 
 def cmd_register(org_id: int, graph: Graph, source: Cell, sink: Cell, ledger_dsn: str) -> None:
@@ -254,6 +285,11 @@ def main() -> None:
         p.add_argument("--org-id", type=int, required=True)
         p.add_argument("--from", dest="source", default="source", help="source cell in fleet.yaml")
     p = sub.add_parser(
+        "init-ledger",
+        help="Create the ledger database (if absent) and apply its schema; idempotent",
+    )
+    p.add_argument("--reset", action="store_true", help="also truncate move state for a fresh run")
+    p = sub.add_parser(
         "register",
         help="Register the org's move: move + pending unit rows (takes the one-move lease)",
     )
@@ -281,11 +317,15 @@ def main() -> None:
     )
     p = sub.add_parser("dashboard", help="Serve the demo dashboard")
     p.add_argument("--port", type=int, default=8008)
-    p.add_argument("--host", default="127.0.0.1", help="bind address; 0.0.0.0 to serve behind a Service")
+    p.add_argument(
+        "--host", default="127.0.0.1", help="bind address; 0.0.0.0 to serve behind a Service"
+    )
     args = parser.parse_args()
 
     graph, cells, ledger_dsn = load_config(CONFIG, FLEET)
     match args.cmd:
+        case "init-ledger":
+            cmd_init_ledger(ledger_dsn, args.reset)
         case "create-publication":
             cmd_create_publication(args.org_id, graph, cells[args.source], ledger_dsn)
         case "register":
@@ -303,18 +343,9 @@ def main() -> None:
             except KeyboardInterrupt:
                 pass
         case "drop-slot":
-            for db in cells[args.source].databases:
-                with connect(db.decode_dsn) as conn:
-                    for store in db.stores:
-                        slot.drop_replication_slot(conn, slot.slot_name(args.org_id, store))
-                        print(f"slot {slot.slot_name(args.org_id, store)} dropped")
+            slot.drop_org_slots(cells[args.source], args.org_id)
         case "drop-publication":
-            for db in cells[args.source].databases:
-                with connect(db.primary_dsn) as admin:
-                    for store in db.stores:
-                        for name in slot.publication_names(args.org_id, store):
-                            slot.drop_publication(admin, name)
-                            print(f"publication {name} dropped on {db.dbname}")
+            slot.drop_org_publications(cells[args.source], args.org_id)
         case "evict":
             cmd_evict(args.org_id, graph, cells[args.cell], ledger_dsn, args.move_id)
         case "dashboard":

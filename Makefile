@@ -32,7 +32,6 @@ databases:
 	@$(SOURCE_PSQL) -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='source_files'" | grep -q 1 || $(SOURCE_PSQL) -d postgres -c "CREATE DATABASE source_files"
 	@$(SOURCE_PSQL) -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='source_metrics'" | grep -q 1 || $(SOURCE_PSQL) -d postgres -c "CREATE DATABASE source_metrics"
 	@$(PSQL) -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='sink'"   | grep -q 1 || $(PSQL) -d postgres -c "CREATE DATABASE sink"
-	@$(PSQL) -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='monarch_ledger'" | grep -q 1 || $(PSQL) -d postgres -c "CREATE DATABASE monarch_ledger"
 
 # The lightweight mock schema: toy tables per store, fast, no Sentry build. Superseded by the
 # real `make schema`; kept as a fallback while the real-schema data/demo path catches up. Each
@@ -43,7 +42,7 @@ mock-schema: databases
 	-uv run python mock_storages/generate_schema.py files | $(SOURCE_PSQL) -d source_files
 	-uv run python mock_storages/generate_schema.py performance_metrics metrics | $(SOURCE_PSQL) -d source_metrics
 	-uv run python mock_storages/generate_schema.py | $(PSQL) -d sink
-	$(PSQL) -d monarch_ledger < monarch/migrations/ledger.sql
+	uv run monarch init-ledger
 
 # Seed the source cell's databases (and the mock filestore) with example data.
 # ANALYZE after seeding: monarch's copy_rows_estimate comes from EXPLAIN, which is only as
@@ -115,8 +114,7 @@ traffic:
 # `make schema SENTRY_REF=<sha>`. See sentry-schema/README.md. (`make mock-schema` = toy schema.)
 schema:
 	$(COMPOSE) run --rm --build sentry-migrate
-	@$(PSQL) -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='monarch_ledger'" | grep -q 1 || $(PSQL) -d postgres -c "CREATE DATABASE monarch_ledger"
-	$(PSQL) -d monarch_ledger < monarch/migrations/ledger.sql
+	uv run monarch init-ledger
 
 # Opt one update-heavy table into update/delete filtering for demo
 opt-in-group:

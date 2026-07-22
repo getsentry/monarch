@@ -23,7 +23,7 @@ import psycopg
 from psycopg import Connection, errors
 from psycopg.rows import dict_row
 
-from . import move
+from . import move, slot
 from .config import BlobStore, Cell, Graph, list_units
 from .utils import trust_sql
 
@@ -294,31 +294,10 @@ class Handler(BaseHTTPRequestHandler):
         if row is None or row[2] != "cut_over":
             self._respond(409, "application/json", _to_json({"error": "needs a cut-over move"}))
             return
-        org, source = row[0], row[1]
-        for command in ("drop-slot", "drop-publication"):
-            args = [
-                sys.executable,
-                "-m",
-                "monarch.cli",
-                command,
-                "--org-id",
-                str(org),
-                "--from",
-                source,
-            ]
-            print(f"{datetime.now():%H:%M:%S} running `monarch {' '.join(args[3:])}`")
-            if subprocess.run(args).returncode != 0:
-                self._respond(
-                    500,
-                    "application/json",
-                    _to_json(
-                        {
-                            "error": f"{command} failed — see the dashboard terminal;"
-                            " phase stays cut_over, finalize again"
-                        }
-                    ),
-                )
-                return
+        org, source = row[0], self.cells[row[1]]
+        # slots before publications: the publications outlive the slots that read them
+        slot.drop_org_slots(source, org)
+        slot.drop_org_publications(source, org)
         m = move.Move(self.conn, move_id)
         units = self.conn.execute(
             "SELECT unit FROM move_unit WHERE move_id = %s", (move_id,)
