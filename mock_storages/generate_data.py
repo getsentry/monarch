@@ -94,11 +94,18 @@ def write_blob(blob: dict, key: str, contents: str) -> None:
         out.write(contents)
 
 
+# highest value each bounded integer type holds; wider numeric types don't overflow here
+INT_MAX = {"smallint": 32767, "integer": 2147483647}
+
+
 def synth_value(data_type: str, max_length: int | None, row_id: int) -> str:
     """A SQL literal (or function call) for a NOT NULL column the manifest doesn't describe.
     Numbers and strings vary by row so single-column unique constraints hold; the rest are
     type-stubs whose exact value never matters to a move."""
-    if data_type in ("bigint", "integer", "smallint", "numeric", "double precision", "real"):
+    if data_type in INT_MAX:
+        # wrap into the type's range; seed ids are already small, so this is identity for them
+        return str(row_id % (INT_MAX[data_type] + 1))
+    if data_type in ("bigint", "numeric", "double precision", "real"):
         return str(row_id)
     if data_type in ("character varying", "text", "character"):
         value = f"seed-{row_id}"[:max_length] if max_length else f"seed-{row_id}"
@@ -128,8 +135,14 @@ def connect_source(stores: set[str]) -> psycopg.Connection:
 
 
 def build_row(
-    table: str, refs: dict, root: str, org_id: int, i: int,
-    schema: Schema, blobs: dict, store_config: dict,
+    table: str,
+    refs: dict,
+    root: str,
+    org_id: int,
+    i: int,
+    schema: Schema,
+    blobs: dict,
+    store_config: dict,
 ) -> tuple[list[str], list[str]]:
     """The columns and value literals for one row: id, the root's friendly name/slug, the
     manifest's FK/blob columns, then every other column the seed must supply."""
@@ -175,22 +188,35 @@ def insert(cur: psycopg.Cursor, table: str, columns: list[str], values: list[str
 
 
 def probe(
-    conn: psycopg.Connection, table: str, refs: dict, root: str,
-    schema: Schema, blobs: dict, store_config: dict,
+    conn: psycopg.Connection,
+    table: str,
+    refs: dict,
+    root: str,
+    schema: Schema,
+    blobs: dict,
+    store_config: dict,
+    org_id: int = 1,
 ) -> bool:
     """Trial-insert against the real schema (rolled back), letting it tell us two things: which
     nullable columns a CHECK guard needs filled (recorded on schema.required), and whether a
     second row of one org collides on a unique/exclusion constraint. Returns True when it does --
-    the table then gets its anchor row and nothing more."""
+    the table then gets its anchor row and nothing more. org_id picks the scope the trial rows
+    attach to: the seed probes org 1 on empty tables; traffic passes a synthetic org (no seed
+    rows) so the anchor's id can't collide with an already-seeded row."""
     with conn.cursor() as cur:
         cur.execute("SAVEPOINT probe")
         while True:  # fill the anchor until it clears every CHECK, then leave it inserted
             try:
-                insert(cur, table, *build_row(table, refs, root, 1, 0, schema, blobs, store_config))
+                insert(
+                    cur,
+                    table,
+                    *build_row(table, refs, root, org_id, 0, schema, blobs, store_config),
+                )
                 break
             except psycopg.errors.CheckViolation as e:
                 cur.execute("ROLLBACK TO SAVEPOINT probe")
                 name = e.diag.constraint_name
+                assert name is not None  # a CHECK violation always names its constraint
                 filled = schema.required.get(table, set())
                 unfilled = [c for c in schema.checks[table][name] if c not in filled]
                 if not unfilled:
@@ -198,8 +224,10 @@ def probe(
                 schema.required.setdefault(table, set()).add(unfilled[0])
         single = False
         try:  # a second row of the same org: does anything but the (distinct) id keep it apart?
-            insert(cur, table, *build_row(table, refs, root, 1, 1, schema, blobs, store_config))
-        except (psycopg.errors.UniqueViolation, psycopg.errors.ExclusionViolation):
+            insert(
+                cur, table, *build_row(table, refs, root, org_id, 1, schema, blobs, store_config)
+            )
+        except psycopg.errors.UniqueViolation, psycopg.errors.ExclusionViolation:
             single = True
         cur.execute("ROLLBACK TO SAVEPOINT probe")
     return single
