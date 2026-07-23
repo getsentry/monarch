@@ -105,7 +105,7 @@ snapshot:
 # stream (the first org is the mover's subject; org 2's writes must never cross). Run
 # beside the dashboard: stop stream while this runs = lag climbs; restart = catch-up.
 traffic:
-	PYTHONUNBUFFERED=1 uv run python mock_storages/traffic.py
+	PYTHONUNBUFFERED=1 uv run python mock_storages/traffic.py --rate 5 --bias-org $(ORG)
 
 # The default schema: build real Sentry at a pinned revision and apply its real schema across
 # every fleet database -- each store's tables on the database fleet.yaml assigns it, both cells.

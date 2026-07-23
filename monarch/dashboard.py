@@ -221,18 +221,20 @@ class Handler(BaseHTTPRequestHandler):
         """The dashboard's whole write side: write the requested state into the ledger (a
         guarded update, only from a legal predecessor) and let the workers respond. A Phase
         advances the move; a UnitStatus advances every postgres store's unit to it -- the
-        trigger each worker polls for. `note` is the journal line the transition records, so
-        the feed reads as the operator's intent."""
+        trigger each worker polls for. `note` is the operator's single intent: journaled once
+        (org-level for a unit fan-out, on the phase line for a Phase), never repeated per unit,
+        so the feed leads with the request and the per-unit markers stay bare."""
         m = move.Move(self.conn, int(body["move"]))
         if isinstance(target, move.Phase):
             moved = m.transition(target, note=note)
         else:
+            m.add_event(note)
             source = self.cells[m.cells()[0]]
             moved = [
                 store
                 for db in source.databases
                 for store in db.stores
-                if move.MoveUnit(m, store).transition(target, note=note)
+                if move.MoveUnit(m, store).transition(target)
             ]
         self._respond(200, "application/json", _to_json({"target": target, "moved": moved}))
 
@@ -276,6 +278,28 @@ class Handler(BaseHTTPRequestHandler):
         m.transition(move.Phase.CUT_OVER, note="demo: routing flip is a no-op here")
         self._respond(200, "application/json", _to_json({"phase": "cut_over"}))
 
+    def _tear_down(self, m: move.Move, source: Cell, org: int) -> None:
+        """The single teardown: drop the org's slots + publications on the source and mark
+        every unit slot_dropped. Both terminal paths run it before advancing -- finalize into
+        evicting, abort into aborted -- so no move reaches a closed phase (which frees the
+        one-move lease for the next move) with source plumbing still live to collide with.
+        Idempotent: both drops no-op on an absent object, so a re-run after a partial failure
+        is safe. Slots before publications: a publication outlives the slot that reads it."""
+        slot.drop_org_slots(source, org)
+        slot.drop_org_publications(source, org)
+        # name the dropped publications in the slot_dropped marker itself (one line, not a
+        # second event that restates it); the marker already carries the slot. blob units hold
+        # no slot/publication, so their marker stands bare
+        db_of = {store: db.dbname for db in source.databases for store in db.stores}
+        for (unit,) in self.conn.execute(
+            "SELECT unit FROM move_unit WHERE move_id = %s", (m.id,)
+        ).fetchall():
+            note = None
+            if unit in db_of:
+                names = "/".join(slot.publication_names(org, unit))
+                note = f"publications {names} on {db_of[unit]}"
+            move.MoveUnit(m, unit).transition(move.UnitStatus.SLOT_DROPPED, note=note)
+
     def _finalize(self, body) -> None:
         """Teardown, its own called-out step: drop the slots + publications, mark each unit
         slot_dropped, and enter `evicting` -- the commit boundary, past which revert is gone
@@ -295,18 +319,12 @@ class Handler(BaseHTTPRequestHandler):
             self._respond(409, "application/json", _to_json({"error": "needs a cut-over move"}))
             return
         org, source = row[0], self.cells[row[1]]
-        # slots before publications: the publications outlive the slots that read them
-        slot.drop_org_slots(source, org)
-        slot.drop_org_publications(source, org)
         m = move.Move(self.conn, move_id)
-        units = self.conn.execute(
-            "SELECT unit FROM move_unit WHERE move_id = %s", (move_id,)
-        ).fetchall()
-        for (unit,) in units:
-            move.MoveUnit(m, unit).transition(move.UnitStatus.SLOT_DROPPED, note="teardown")
+        m.add_event("operator requested finalize — past eviction there is no revert")
+        self._tear_down(m, source, org)
         m.transition(
             move.Phase.EVICTING,
-            note="slots + publications dropped; source copy still present",
+            note="source copy still present — evict it to close the move",
         )
         self._respond(200, "application/json", _to_json({"phase": "evicting"}))
 
@@ -344,12 +362,31 @@ class Handler(BaseHTTPRequestHandler):
         self._respond(202, "application/json", _to_json({"spawned": "evict"}))
 
     def _abort(self, body) -> None:
+        """Abort the move: tear down the source plumbing, then flip to the terminal aborted
+        phase. Teardown precedes the flip deliberately -- a move must not reach a closed phase
+        (which frees the one-move lease for the next move) with slots or publications still
+        live. A teardown failure raises before the flip, so the phase stays put, the abort is
+        re-runnable, and no new move can start meanwhile."""
         try:
             move_id = int(body["move"])
         except KeyError, TypeError, ValueError:
             self._respond(400, "application/json", _to_json({"error": "expected {move}"}))
             return
-        if move.Move(self.conn, move_id).transition(move.Phase.ABORTED, note="operator abort"):
+        row = self.conn.execute(
+            "SELECT root_id, source_cell, phase FROM move WHERE id = %s", (move_id,)
+        ).fetchone()
+        if row is None or row[2] not in ("active", "draining"):
+            self._respond(
+                409,
+                "application/json",
+                _to_json({"error": "nothing abortable — the phase moved on"}),
+            )
+            return
+        org, source = row[0], self.cells[row[1]]
+        m = move.Move(self.conn, move_id)
+        m.add_event("operator requested abort — org never left the source")
+        self._tear_down(m, source, org)
+        if m.transition(move.Phase.ABORTED):
             self._respond(200, "application/json", _to_json({"aborted": move_id}))
         else:
             self._respond(

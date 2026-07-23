@@ -166,6 +166,15 @@ class MoveUnit:
         assert row is not None
         return UnitStatus(row[0])
 
+    def applied_changes(self) -> int:
+        """The persisted running count, so a resumed stream continues it rather than restarting
+        from zero (the slot resumes from its confirmed point, so only new changes are counted)."""
+        row = self.move.conn.execute(
+            "SELECT applied_changes FROM move_unit WHERE move_id = %s AND unit = %s",
+            (self.move.id, self.unit),
+        ).fetchone()
+        return row[0] if row and row[0] is not None else 0
+
     def transition(self, to: UnitStatus, note: str | None = None) -> bool:
         """Guarded update of this mover's status; legal sources derive from the map (its
         multi-source destination, slot_dropped, means the same thing from either source).
@@ -211,6 +220,7 @@ class MoveUnit:
         applied: str | None = None,
         head: str | None = None,
         last_commit_at: datetime | None = None,
+        applied_changes: int | None = None,
     ) -> None:
         """Liveness, overwritten on a clock: the mover can't announce its death, so it
         announces being alive and staleness becomes the signal. Position gauges ride the
@@ -218,9 +228,10 @@ class MoveUnit:
         read by transitions."""
         self.move.conn.execute(
             "UPDATE move_unit SET heartbeat_at = now(), applied = COALESCE(%s, applied),"
-            " head = COALESCE(%s, head), last_commit_at = COALESCE(%s, last_commit_at)"
+            " head = COALESCE(%s, head), last_commit_at = COALESCE(%s, last_commit_at),"
+            " applied_changes = COALESCE(%s, applied_changes)"
             " WHERE move_id = %s AND unit = %s",
-            (applied, head, last_commit_at, self.move.id, self.unit),
+            (applied, head, last_commit_at, applied_changes, self.move.id, self.unit),
         )
 
     def add_event(self, message: str) -> None:

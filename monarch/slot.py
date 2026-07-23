@@ -223,7 +223,14 @@ def _drop_best_effort(dsn: str, name: str) -> None:
 
 
 def drop_replication_slot(conn: Connection, name: str) -> None:
-    """Drop the slot after cutover so retained WAL can be reclaimed."""
+    """Drop the slot so retained WAL can be reclaimed. A no-op when the slot was never created
+    -- an abort tears down before snapshot may have made it, and pg_drop_replication_slot has
+    no IF EXISTS -- so guard on the catalog. An active slot still errors: teardown must not pull
+    WAL out from under a running stream."""
+    if conn.execute(
+        "SELECT 1 FROM pg_replication_slots WHERE slot_name = %s", (name,)
+    ).fetchone() is None:
+        return
     conn.execute("SELECT pg_drop_replication_slot(%s)", (name,))
 
 

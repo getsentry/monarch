@@ -153,6 +153,13 @@ def main() -> None:
         description="Write a steady trickle of org-scoped changes to the source cell"
     )
     ap.add_argument("--rate", type=float, default=1.0, help="writes per second, roughly")
+    ap.add_argument("--bias-org", type=int, help="org to favor over the rest")
+    ap.add_argument(
+        "--bias-weight",
+        type=float,
+        default=5.0,
+        help="how many times likelier --bias-org is than any other org",
+    )
     args = ap.parse_args()
     graph = load_graph(MANIFEST)
     with open(MANIFEST) as f:
@@ -162,11 +169,16 @@ def main() -> None:
     align_sequences(graph, conns)
     schemas, single = introspect(graph, databases, conns, blobs, store_config)
     tables = [t for t in writable_tables(graph, conns) if not single[t]]
-    print(f"traffic: orgs {orgs} across {len(tables)} tables at ~{args.rate}/s (Ctrl-C to stop)")
+    # Weight org selection: --bias-org draws --bias-weight times as often as any other org.
+    weights = [args.bias_weight if o == args.bias_org else 1.0 for o in orgs]
+    bias = f", org {args.bias_org} at {args.bias_weight}x" if args.bias_org else ""
+    print(
+        f"traffic: orgs {orgs} across {len(tables)} tables at ~{args.rate}/s{bias} (Ctrl-C to stop)"
+    )
     n = 0
     while True:
         n += 1
-        org = random.choice(orgs)
+        org = random.choices(orgs, weights=weights)[0]
         # a large row index keeps synthesized values clear of the seed's rows for this org
         change = write_row(
             graph, conns, blobs, store_config, schemas, random.choice(tables), org, 100_000 + n

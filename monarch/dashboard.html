@@ -24,8 +24,8 @@
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--page); color: var(--ink);
          font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  .wrap { max-width: 1140px; margin: 0 auto; padding: 18px 24px 40px; }
-  .layout { display: grid; grid-template-columns: 1fr 260px; gap: 16px; align-items: start; }
+  .wrap { max-width: 1230px; margin: 0 auto; padding: 18px 24px 40px; }
+  .layout { display: grid; grid-template-columns: 1fr 290px; gap: 16px; align-items: start; }
   .main { min-width: 0; }
   .side { display: grid; gap: 16px; }
   @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
@@ -156,9 +156,13 @@
             margin: 1px 0 7px; }
   .lagbar div { height: 100%; width: 0%; background: var(--blue); border-radius: 2px;
                 transition: width 0.3s, background 0.3s; }
-  #streamrows .kv { font-size: 12.5px; margin-top: 0; padding: 2px 0; }
-  #streamrows .kv span:last-child { color: var(--ink-2); }
-  #streamrows .kv span.hit { color: var(--good); }
+  #streamrows .kv, #drainrows .kv { font-size: 12.5px; margin-top: 0; padding: 2px 0; }
+  #streamrows .kv span:last-child, #drainrows .kv span:last-child { color: var(--ink-2); }
+  #streamrows .kv span.hit, #drainrows .kv span.hit { color: var(--good); }
+  .quietbar div { background: var(--aqua); }       /* draining, distinct from lag blue */
+  .quietbar div.done { background: var(--good); }   /* quiet ≥ 2 min: drained */
+  /* not-ready cue: the unfilled track is faintly red until drained, so red recedes as it fills */
+  .quietbar.pending { background: color-mix(in srgb, var(--bad) 18%, var(--grid)); }
 
   .feed ol { list-style: none; margin: 0; padding: 0; max-height: 340px;
              overflow-y: auto; font-size: 13px; }
@@ -201,6 +205,10 @@
       <article class="card" id="streamcard">
         <h2>stream</h2>
         <div id="streamrows"></div>
+      </article>
+      <article class="card" id="draincard">
+        <h2>drain readiness</h2>
+        <div id="drainrows"></div>
       </article>
       <article class="card" id="movescard">
         <h2>moves</h2>
@@ -257,6 +265,7 @@ if (pinned) {
 } else {
   $("snap").style.display = "none";
   $("streamcard").style.display = "none";
+  $("draincard").style.display = "none";
   document.querySelector(".feed").style.display = "none";
   $("pill").style.display = "none";
   $("back").style.display = "none";
@@ -328,12 +337,13 @@ function renderSnapshot(units) {
 
 const LAG_FULL = 1 << 20;  // bar full-scale: 1 MB of WAL behind
 const KEYS_FULL = 20;      // blob bar full-scale: pending keys
+const QUIET_FULL = 120000; // quiet-bar full-scale: 2 min silent ⇒ org drained, cut-over-safe
 
 function streamRow(u) {
   if (u.status === "evicted") return { text: "source copy deleted ✓", frac: 0, cls: "hit" };
   if (u.status === "evicting") return { text: "evicting source…", frac: 0, cls: "" };
   if (u.status === "slot_dropped") return { text: "pipe closed ✓", frac: 0, cls: "hit" };
-  if (u.status !== "streaming") return { text: "not streaming yet", frac: 0, cls: "" };
+  if (u.status !== "streaming") return { text: "queued", frac: 0, cls: "" };
   // blob units heartbeat key counts, not LSNs
   if (blobStores.has(u.unit)) {
     if (!u.head) return { text: "worker running — no counts yet", frac: 0, cls: "" };
@@ -343,18 +353,53 @@ function streamRow(u) {
       : { text: `${fmt(+u.head)}/${fmt(+u.head)} keys ✓`, frac: 0, cls: "hit" };
   }
   const lag = lagBytes(u);
-  if (lag == null) return { text: "streaming — no positions yet", frac: 0, cls: "" };
+  // mover-fed count of change events applied; ticks up while streaming, flat = quiesced
+  const applied = u.applied_changes != null ? `${fmt(+u.applied_changes)} applied · ` : "";
+  if (lag == null) return { text: `${applied}streaming — no positions yet`, frac: 0, cls: "" };
   return lag
-    ? { text: `${fmtBytes(lag)} behind`, frac: lag / LAG_FULL, cls: "" }
-    : { text: "0 B behind ✓", frac: 0, cls: "hit" };
+    ? { text: `${applied}${fmtBytes(lag)} behind`, frac: lag / LAG_FULL, cls: "" }
+    : { text: `${applied}0 B behind ✓`, frac: 0, cls: "hit" };
 }
 
+// drain-readiness for a streaming postgres unit -- the doc's "org quiet clock", and the one bar
+// a stream earns. while it's still catching up (lag > 0) readiness is 0; once caught up (lag 0)
+// it fills with quiet time -- seconds since the org last had a change applied -- reaching
+// "drained" at 2 min (upstream empty AND everything ours applied). lag itself is text, not a bar:
+// it's a distance that goes up when worse, not progress toward a goal
+function quietClock(u) {
+  if (u.status !== "streaming" || blobStores.has(u.unit)) return null;
+  const lag = lagBytes(u);
+  if (lag == null) return { text: "no positions yet", frac: 0, done: false };
+  if (lag > 0) return { text: "catching up…", frac: 0, done: false };
+  // no writes to this store's tables for the org -- normal (many orgs don't use every feature),
+  // so it's neither pending-red nor drained-green: nothing to drain, stays neutral grey
+  if (!u.last_commit_at) return { text: "no changes seen", frac: 0, done: false, neutral: true };
+  const ms = Date.now() - new Date(u.last_commit_at);
+  const s = Math.floor(ms / 1000);
+  const label = s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(Math.floor(s % 60)).padStart(2, "0")}s`;
+  const done = ms >= QUIET_FULL;
+  return { text: `quiet ${label} / 2m${done ? " ✓ drained" : ""}`, frac: ms / QUIET_FULL, done };
+}
+
+// stream card: a scannable text-only status list -- applied · lag for postgres, keys for blobs.
+// no bars here; progress bars live in the drain card below, mirroring the lifecycle doc's split
 function renderStream(units) {
   $("streamrows").innerHTML = units.map(u => {
     const r = streamRow(u);
-    return `<div class="kv"><span>${u.unit}</span><span class="${r.cls}">${r.text}</span></div>`
-      + `<div class="lagbar"><div style="width:${Math.min(r.frac, 1) * 100}%"></div></div>`;
+    return `<div class="kv"><span>${u.unit}</span><span class="${r.cls}">${r.text}</span></div>`;
   }).join("");
+}
+
+// drain card: one row + readiness bar per streaming postgres unit (blobs don't drain WAL).
+// empty while catching up, filling teal→green as it goes quiet toward the 2-minute drained mark
+function renderDrain(units) {
+  const rows = units.map(u => {
+    const q = quietClock(u);
+    if (!q) return "";
+    return `<div class="kv"><span>${u.unit}</span><span class="${q.done ? "hit" : ""}">${q.text}</span></div>`
+      + `<div class="lagbar quietbar${q.done || q.neutral ? "" : " pending"}"><div class="${q.done ? "done" : ""}" style="width:${Math.min(q.frac, 1) * 100}%"></div></div>`;
+  }).join("");
+  $("drainrows").innerHTML = rows || `<div class="kv"><span>—</span><span>no active streams</span></div>`;
 }
 
 function appendEvents(events) {
@@ -408,6 +453,7 @@ async function poll() {
   appendEvents(state.events);
   renderSnapshot(state.units);
   renderStream(state.units);
+  renderDrain(state.units);
   renderActions();
 }
 
@@ -554,7 +600,7 @@ const ACTIONS = [
     run: async note => {
       const { ok, status, body } = await post("/abort", { move: +pinned });
       if (!ok) { note(body.error ?? `failed (${status}) — restart \`monarch dashboard\`?`); return false; }
-      note("aborted — org never left the source; drop slots + publications via CLI, then scrub sink copy is armed");
+      note("aborted — slots + publications dropped, org never left the source; scrub sink copy is armed");
       return true;
     },
     arm: m => !m || !["active", "draining"].includes(m.phase) ? "nothing abortable"
@@ -642,7 +688,9 @@ function storeTip(s) {
       ` — last heartbeat ${fmtDur(Date.now() - new Date(u.heartbeat_at))} ago`;
     else if (u.status !== "pending") lines += `<br>mover: no heartbeat yet`;
     if (u.status === "streaming" && lagBytes(u) != null)
-      lines += `<br>stream: lag <b>${fmtBytes(lagBytes(u))}</b> — applied ${u.applied}` +
+      lines += `<br>stream: lag <b>${fmtBytes(lagBytes(u))}</b>` +
+        (u.applied_changes != null ? ` · <b>${fmt(+u.applied_changes)}</b> changes applied` : "") +
+        ` · at ${u.applied}` +
         (u.last_commit_at
           ? ` (committed ${fmtDur(Date.now() - new Date(u.last_commit_at))} ago)` : "") +
         ` · head ${u.head}`;

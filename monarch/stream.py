@@ -59,12 +59,15 @@ class _Stream:
     unit: MoveUnit
     pending: list[Change] = field(default_factory=list)
     applied_lsn: int = 0  # last flushed position; 0 until the first commit or skip-flush
+    applied_changes: int = 0  # changes applied this stream; heartbeated for the panel
+    last_feed_changes: int = 0  # applied_changes at the last feed line; the news-only throttle
     last_commit_at: datetime | None = None
     in_txn: bool = False  # between a Begin and its Commit: no safe flush point
 
 
 HEARTBEAT_EVERY = 2.0  # seconds; a throttle, not a schedule -- busy loops don't write more
 BLOB_BATCH = 8  # keys per loop pass: the worker rides the stream loop, so batches stay small
+FEED_EVERY = 30.0  # min seconds between the streaming explainer line in the feed (news-only on top)
 
 
 def format_lsn(lsn: int) -> str:
@@ -117,24 +120,26 @@ def run_streams(
                 units[s.store],
             )
         )
-        # do-then-record: streaming only once this slot really has a consumer. False on a
-        # restart (already streaming) -- journal the resume as its own fact, not a fake
-        # duplicate transition
-        if not units[s.store].transition(UnitStatus.STREAMING, note=f"consuming {s.slot}"):
-            units[s.store].add_event(f"mover resumed: consuming {s.slot}")
-    for store, bm in blob_members.items():
-        copied, total = bm.counts()
-        pending_keys = total - copied
-        if not units[store].transition(
-            UnitStatus.STREAMING, note=f"worker draining {pending_keys} pending key(s)"
-        ):
-            units[store].add_event("worker resumed")
+        # the -> streaming marker carries the store's chip already, and the slot name is just
+        # org+store -- redundant -- so a postgres unit earns no line beyond the marker. in the
+        # dashboard flow the status was set as the worker's trigger, so this is a silent no-op
+        # and that marker stands; in the CLI flow this transition is the marker
+        units[s.store].transition(UnitStatus.STREAMING)
+    for store in blob_members:
+        # bare marker like the postgres units: blob byte-copy progress (copied/total keys) is
+        # live in the stream panel's key bar, so it doesn't belong in the feed as a snapshot
+        units[store].transition(UnitStatus.STREAMING)
+    for st in streams:
+        # resume the running total across restarts, so the panel doesn't drop to 0 and re-climb
+        st.applied_changes = st.unit.applied_changes()
+        st.last_feed_changes = st.applied_changes
     names = ", ".join(st.store for st in streams)
     print(f"\nstream: consuming slots on [{names}] for org changes (Ctrl-C to stop)\n")
     # read_message + select instead of consume_stream: consume_stream is one long-running C
     # call, and Python only delivers Ctrl-C between bytecode instructions -- so it can't be
     # interrupted. select() returns control to the interpreter on a signal.
     last_beat = 0.0
+    last_feed = 0.0
     while True:
         # clock-driven, not data-driven: a healthy mover on an idle org still beats, and a
         # dead one stops -- heartbeat_at is the ledger's liveness record (the dashboard's
@@ -146,6 +151,7 @@ def run_streams(
                     applied=format_lsn(st.applied_lsn) if st.applied_lsn else None,
                     head=format_lsn(st.cursor.wal_end) if st.cursor.wal_end else None,
                     last_commit_at=st.last_commit_at,
+                    applied_changes=st.applied_changes,
                 )
             for store, bm in blob_members.items():
                 copied, total = bm.counts()  # applied/head take each backend's own units: keys here
@@ -161,6 +167,15 @@ def run_streams(
                 for store in blob_members:
                     units[store].transition(UnitStatus.COPIED, note="stream stopped")
                 return
+        # explainer in the feed, heavily throttled and news-only: at most one line per unit per
+        # FEED_EVERY, and only when it applied more changes since its last line -- an idle stream
+        # stays silent, a busy one can't flood. distinct from the 2s gauge heartbeat above
+        if now - last_feed >= FEED_EVERY:
+            for st in streams:
+                if st.applied_changes > st.last_feed_changes:
+                    st.unit.add_event(f"streaming — {st.applied_changes:,} changes applied so far")
+                    st.last_feed_changes = st.applied_changes
+            last_feed = now
         idle = True
         for st in streams:
             if (msg := st.cursor.read_message()) is None:
@@ -207,6 +222,7 @@ def apply_message(
                             if (key := change.get(column)) is not None:
                                 blob_members[store].add(key)
                         apply_change(conn, change, graph.primary_key_of[change.table])
+            st.applied_changes += len(st.pending)
             st.pending.clear()
         st.cursor.send_feedback(flush_lsn=msg.data_start)
         st.applied_lsn = msg.data_start

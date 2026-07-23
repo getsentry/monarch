@@ -38,10 +38,11 @@ CREATE TABLE IF NOT EXISTS move_unit (
     copy_rows_total    bigint,
     -- advisory gauges, overwritten each mover heartbeat; never read by transitions.
     -- stale heartbeat_at = the mover is dead or wedged
-    applied        text,         -- position applied to the sink: pg = LSN, clickhouse = commit-log offset
-    head           text,         -- source log head, from the feed (never polled)
-    last_commit_at timestamptz,  -- source commit time of the last applied transaction
-    heartbeat_at   timestamptz,
+    applied         text,         -- position applied to the sink: pg = LSN, clickhouse = commit-log offset
+    applied_changes bigint,       -- running count of change events applied this stream; flat = quiesced (display only)
+    head            text,         -- source log head, from the feed (never polled)
+    last_commit_at  timestamptz,  -- source commit time of the last applied transaction
+    heartbeat_at    timestamptz,
     PRIMARY KEY (move_id, unit)
 );
 
