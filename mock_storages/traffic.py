@@ -26,9 +26,10 @@ from monarch.config import Graph, PostgresStore, load_graph
 from monarch.utils import trust_sql
 
 Conns = dict[str, psycopg.Connection]  # store -> its hosting primary
-# A scope with no seed rows so the probe's rolled-back trial rows can't collide. It sits below the
-# seed's id blocks (which start at 10000), and its second row's id (org*10000+1 ~= 10^8) stays
-# unused and within a 32-bit integer id column -- the probe inserts a real row with an explicit id.
+# A scope with no seed rows so the probe's rolled-back trial rows can't collide. No seeded row
+# carries this org, so neither its anchor id (= PROBE_ORG) nor its second row's id (1*10000+9999 =
+# 19999) is used, and both stay within a 32-bit integer id column -- the probe inserts a real row
+# with an explicit id. Kept under 10000 so it occupies the low slot of the i*10000+org id scheme.
 PROBE_ORG = 9_999
 
 

@@ -19,9 +19,10 @@ in one transaction so its DEFERRABLE foreign keys resolve at commit, once every 
 
 Row counts come from ROWS (random for tables not listed). Each table's row 0 is the
 anchor: id = the org's id, and every literal FK points at it -- the per-database
-invocations, the demo, and traffic all assume it. Extra rows live in the org's id block,
-so a rerun conflicts loudly instead of minting duplicate orgs whose children attach to
-the originals. Reseeding means resetting first.
+invocations, the demo, and traffic all assume it. Non-anchor ids are i * 10000 + org_id --
+globally unique across orgs (org ids stay under 10000), so a long-running traffic writer's
+large i can't drift into another org's ids, and a rerun conflicts loudly instead of minting
+duplicate orgs whose children attach to the originals. Reseeding means resetting first.
 """
 
 import hashlib
@@ -37,7 +38,7 @@ from dependencies import CONFIG, FLEET, load_from_config, topological_sort
 
 from monarch.utils import trust_sql
 
-ORG_COUNT = 2
+ORG_COUNT = 20
 ROWS = {"group": 1000}  # tables not listed roll 8-40
 REPO_ROOT = os.path.dirname(os.path.abspath(CONFIG))
 
@@ -146,7 +147,7 @@ def build_row(
 ) -> tuple[list[str], list[str]]:
     """The columns and value literals for one row: id, the root's friendly name/slug, the
     manifest's FK/blob columns, then every other column the seed must supply."""
-    row_id = org_id if i == 0 else org_id * 10000 + i
+    row_id = org_id if i == 0 else i * 10000 + org_id
     columns, values = ["id"], [str(row_id)]
     if table == root:
         for label in ("name", "slug"):

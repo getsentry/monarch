@@ -359,6 +359,9 @@ function renderStream(units) {
 
 function appendEvents(events) {
   const ol = $("feed");
+  // tail: stick to the bottom only when the reader is already there, so a poll never yanks
+  // them down mid-scroll -- an empty feed reads as "at bottom", so the first load sticks
+  const atBottom = ol.scrollHeight - ol.scrollTop - ol.clientHeight < 40;
   for (const e of events) {
     if (e.unit) {
       const t = unitTimes[e.unit] ??= {};
@@ -378,7 +381,7 @@ function appendEvents(events) {
     ol.appendChild(li);
     since = Math.max(since, e.id);
   }
-  if (events.length) ol.scrollTop = ol.scrollHeight;
+  if (events.length && atBottom) ol.scrollTop = ol.scrollHeight;
 }
 
 async function poll() {
