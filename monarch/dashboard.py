@@ -340,9 +340,9 @@ class Handler(BaseHTTPRequestHandler):
             self._respond(400, "application/json", _to_json({"error": "expected {move}"}))
             return
         row = self.conn.execute(
-            "SELECT root_id, sink_cell, phase FROM move WHERE id = %s", (move_id,)
+            "SELECT root_id, phase FROM move WHERE id = %s", (move_id,)
         ).fetchone()
-        if row is None or row[2] != "aborted":
+        if row is None or row[1] != "aborted":
             self._respond(409, "application/json", _to_json({"error": "needs an aborted move"}))
             return
         args = [
@@ -352,8 +352,6 @@ class Handler(BaseHTTPRequestHandler):
             "evict",
             "--org-id",
             str(row[0]),
-            "--cell",
-            row[1],
             "--move-id",
             str(move_id),
         ]

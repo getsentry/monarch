@@ -152,4 +152,4 @@ verify:
 # cleanup) reclaims unreferenced bytes; the demo has no such job, so orphans persist until
 # `make reset`.
 evict-sink:
-	uv run monarch evict --org-id $(ORG) --cell sink --move-id $(MOVE)
+	uv run monarch evict --org-id $(ORG) --move-id $(MOVE)

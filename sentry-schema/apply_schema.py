@@ -67,18 +67,25 @@ def migrate_template(host: str, port: int) -> None:
     subprocess.run(["sentry", "django", "migrate", "--noinput"], env=env, check=True)
 
 
-def clone_and_prune(host: str, port: int, dbname: str, keep: set[str]) -> None:
-    """Clone the template into dbname, then drop every table not in `keep` (CASCADE)."""
+def clone_and_prune(
+    host: str, port: int, dbname: str, keep: set[str], keep_unmanaged: bool, managed: set[str]
+) -> None:
+    """Clone the template into dbname, then drop every table not kept (CASCADE). `keep` is this
+    database's own stores' tables. With `keep_unmanaged`, the non-org tables (everything in the
+    template not in `managed`) are kept too -- so the database that hosts the `default` store
+    holds them, as a self-hosted monolith does."""
     with closing(connect(host, port, MAINTENANCE_DB)) as conn, conn.cursor() as cur:
         cur.execute(f'DROP DATABASE IF EXISTS "{dbname}" WITH (FORCE)')
         cur.execute(f'CREATE DATABASE "{dbname}" TEMPLATE {TEMPLATE_DB}')
     with closing(connect(host, port, dbname)) as conn, conn.cursor() as cur:
         cur.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
         present = {row[0] for row in cur.fetchall()}
-        for table in present - keep:
+        keep_all = keep | (present - managed if keep_unmanaged else set())
+        drop = present - keep_all
+        for table in drop:
             cur.execute(f'DROP TABLE IF EXISTS "{table}" CASCADE')
     print(
-        f"--> {host}:{port}/{dbname}: kept {len(present & keep)}, dropped {len(present - keep)}",
+        f"--> {host}:{port}/{dbname}: kept {len(present) - len(drop)}, dropped {len(drop)}",
         flush=True,
     )
 
@@ -87,20 +94,25 @@ def main() -> None:
     with open(FLEET_PATH) as f:
         fleet = yaml.safe_load(f)
     store_of = store_by_table()
+    managed = set(store_of)
 
     # Group target databases by server so the migrations run once per server, then cloned.
-    by_server: dict[tuple[str, int], list[tuple[str, set[str]]]] = defaultdict(list)
+    by_server: dict[tuple[str, int], list[tuple[str, set[str], bool]]] = defaultdict(list)
     for cell in fleet["cells"].values():
         for db in cell["databases"]:
             dsn = parse_dsn(db["primary_dsn"])
             host, port = SERVICE_BY_PORT[dsn["port"]]
             keep = {t for t, store in store_of.items() if store in set(db["stores"])}
-            by_server[(host, port)].append((dsn["dbname"], keep))
+            # The database hosting the `default` store also holds the non-org tables, as a monolith
+            # does -- the source's default DB and the (all-stores) sink. copy_unmanaged_tables
+            # carries them sink-ward at provision.
+            keep_unmanaged = "default" in db["stores"]
+            by_server[(host, port)].append((dsn["dbname"], keep, keep_unmanaged))
 
     for (host, port), databases in by_server.items():
         migrate_template(host, port)
-        for dbname, keep in databases:
-            clone_and_prune(host, port, dbname, keep)
+        for dbname, keep, keep_unmanaged in databases:
+            clone_and_prune(host, port, dbname, keep, keep_unmanaged, managed)
         with closing(connect(host, port, MAINTENANCE_DB)) as conn, conn.cursor() as cur:
             cur.execute(f"DROP DATABASE IF EXISTS {TEMPLATE_DB} WITH (FORCE)")
 

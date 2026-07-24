@@ -1,5 +1,4 @@
 import argparse
-import os
 import sys
 from contextlib import ExitStack, closing
 from pathlib import Path
@@ -9,17 +8,12 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from . import dashboard, move, slot, worker
 from .blobs import Bucket, blob_copiers
-from .config import BlobStore, Cell, Graph, connect, list_units, load_config
+from .config import CONFIG, FLEET, BlobStore, Cell, Graph, connect, list_units, load_config
 from .cell_eviction import run_evict
 from .membership import BlobMembership
 from .snapshot import Source, derive_membership, estimate_rows, read_frozen_ids, run_snapshot
 from .stream import StreamSource, run_streams
 from .utils import trust_sql
-
-# Config paths default to the repo-root files, but both monarch and the mock generators honor
-# these env overrides so a test (e.g. the e2e move test) can point at an isolated fleet.
-CONFIG = os.environ.get("MONARCH_MANIFEST", "manifest.generated.yaml")
-FLEET = os.environ.get("MONARCH_FLEET", "fleet.yaml")
 
 
 def cmd_create_publication(org_id: int, graph: Graph, source: Cell, ledger_dsn: str) -> None:
@@ -233,10 +227,14 @@ def cmd_stream(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: st
             raise
 
 
-def cmd_evict(org_id: int, graph: Graph, cell: Cell, ledger_dsn: str, move_id: int) -> None:
+def cmd_evict(
+    org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: str, move_id: int
+) -> None:
     """Abort's sink scrub: delete the doomed partial copy from the sink in one whole-graph
     pass, post-terminal cleanup with no phase change. The finalize-path eviction of the source
     is worker-driven -- each store's worker deletes its own rows and marks its unit evicted."""
+    with connect(ledger_dsn) as book:
+        cell = cells[move.Move(book, move_id).cells()[1]]  # the move's sink
     # Refuse while any of the org's slots survive on the cell: a live stream would replicate
     # the eviction to the sink as ordinary deletes (evict.py). Checked per database on the
     # decode endpoint -- slots live where decoding happens.
@@ -283,7 +281,6 @@ def main() -> None:
     ]:
         p = sub.add_parser(cmd, help=doc)
         p.add_argument("--org-id", type=int, required=True)
-        p.add_argument("--from", dest="source", default="source", help="source cell in fleet.yaml")
     p = sub.add_parser(
         "init-ledger",
         help="Create the ledger database (if absent) and apply its schema; idempotent",
@@ -294,8 +291,6 @@ def main() -> None:
         help="Register the org's move: move + pending unit rows (takes the one-move lease)",
     )
     p.add_argument("--org-id", type=int, required=True)
-    p.add_argument("--from", dest="source", default="source", help="source cell in fleet.yaml")
-    p.add_argument("--to", dest="sink", default="sink", help="destination cell in fleet.yaml")
     # snapshot and stream take no cell flags: the route was fixed at registration
     for cmd, doc in [
         ("snapshot", "Snapshot the org's data along its registered move; creates the slots"),
@@ -307,11 +302,8 @@ def main() -> None:
         "worker", help="Run one store's mover: it picks up the live move and drives its store"
     )
     p.add_argument("--store", required=True, help="the postgres store this worker owns")
-    p = sub.add_parser(
-        "evict", help="Delete the org's rows from a cell: source after cutover, sink to abort"
-    )
+    p = sub.add_parser("evict", help="Scrub the aborted move's partial copy from its sink")
     p.add_argument("--org-id", type=int, required=True)
-    p.add_argument("--cell", default="source", help="cell to evict the org from (fleet.yaml)")
     p.add_argument(
         "--move-id", type=int, required=True, help="move to journal the eviction against"
     )
@@ -322,14 +314,17 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    graph, cells, ledger_dsn = load_config(CONFIG, FLEET)
+    config = load_config(CONFIG, FLEET)
+    graph, cells, ledger_dsn = config.graph, config.cells, config.ledger_dsn
     match args.cmd:
         case "init-ledger":
             cmd_init_ledger(ledger_dsn, args.reset)
         case "create-publication":
-            cmd_create_publication(args.org_id, graph, cells[args.source], ledger_dsn)
+            cmd_create_publication(args.org_id, graph, cells[config.from_cell], ledger_dsn)
         case "register":
-            cmd_register(args.org_id, graph, cells[args.source], cells[args.sink], ledger_dsn)
+            cmd_register(
+                args.org_id, graph, cells[config.from_cell], cells[config.to_cell], ledger_dsn
+            )
         case "snapshot":
             cmd_snapshot(args.org_id, graph, cells, ledger_dsn)
         case "stream":
@@ -343,11 +338,11 @@ def main() -> None:
             except KeyboardInterrupt:
                 pass
         case "drop-slot":
-            slot.drop_org_slots(cells[args.source], args.org_id)
+            slot.drop_org_slots(cells[config.from_cell], args.org_id)
         case "drop-publication":
-            slot.drop_org_publications(cells[args.source], args.org_id)
+            slot.drop_org_publications(cells[config.from_cell], args.org_id)
         case "evict":
-            cmd_evict(args.org_id, graph, cells[args.cell], ledger_dsn, args.move_id)
+            cmd_evict(args.org_id, graph, cells, ledger_dsn, args.move_id)
         case "dashboard":
             with connect(ledger_dsn) as conn:
                 try:

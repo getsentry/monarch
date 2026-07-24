@@ -11,6 +11,12 @@
 #   performance_metrics, metrics = the "source_metrics" database on the same pair
 # (monarch reads/decodes everything on the standby)
 #   sink                = the PG14 instance; all stores colocated in the one "sink" database
+
+# Which cells this migration moves between: `from`/`to` name two of the cells below (the role
+# is the key, the cell's real name the value -- here the demo placeholders `source`/`sink`).
+from: source
+to: sink
+
 cells:
   source:
     databases:

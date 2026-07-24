@@ -4,6 +4,7 @@ database physically hosts each logical store (big cells split stores across clus
 cells colocate several in one database)."""
 
 import graphlib
+import os
 from dataclasses import dataclass
 from functools import cached_property
 from typing import Literal, cast
@@ -11,6 +12,10 @@ from typing import Literal, cast
 import psycopg
 import yaml
 from psycopg.conninfo import conninfo_to_dict
+
+# Config file paths, env-overridable.
+CONFIG = os.environ.get("MONARCH_MANIFEST", "manifest.generated.yaml")
+FLEET = os.environ.get("MONARCH_FLEET", "fleet.yaml")
 
 Eviction = Literal["delete", "keep"]
 
@@ -274,16 +279,30 @@ def load_cells(path: str) -> dict[str, Cell]:
     }
 
 
-def load_config(manifest_path: str, fleet_path: str) -> tuple[Graph, dict[str, Cell], str]:
-    """
-    Load manifest and fleet configs and cross-validate: a fleet is only fully valid relative
-    to a manifest. Also returns the ledger DSN (fleet.yaml `ledger:` -- monarch's own move
-    state, outside any cell).
-    """
+@dataclass(frozen=True)
+class Config:
+    """The loaded, cross-validated manifest + fleet: the org-scoping graph, the fleet's cells,
+    the ledger DSN, and the move's endpoint cells (fleet.yaml `from`/`to`)."""
+
+    graph: Graph
+    cells: dict[str, Cell]
+    ledger_dsn: str
+    from_cell: str
+    to_cell: str
+
+
+def load_config(manifest_path: str, fleet_path: str) -> Config:
+    """Load manifest and fleet configs and cross-validate: a fleet is only fully valid relative
+    to a manifest. The ledger lives in fleet.yaml `ledger:` (monarch's own move state, outside
+    any cell); `from`/`to` name the move's endpoint cells."""
     graph = load_graph(manifest_path)
     cells = load_cells(fleet_path)
     with open(fleet_path) as f:
-        ledger_dsn: str = yaml.safe_load(f)["ledger"]["dsn"]
+        fleet = yaml.safe_load(f)
+    from_cell, to_cell = fleet["from"], fleet["to"]
     for cell in cells.values():
         cell.validate(graph)
-    return graph, cells, ledger_dsn
+    for role, name in (("from", from_cell), ("to", to_cell)):
+        if name not in cells:
+            raise ValueError(f"fleet `{role}: {name}` names no cell")
+    return Config(graph, cells, fleet["ledger"]["dsn"], from_cell, to_cell)

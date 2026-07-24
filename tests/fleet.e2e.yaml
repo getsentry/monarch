@@ -1,6 +1,9 @@
 # Fleet for the e2e move test (tests/compose.yaml): same shape as the repo-root fleet.yaml,
 # pointed at the isolated stack's ports (sink 5542, source-primary 5543, source-standby 5544)
 # and a scratch bucket dir the fixture cleans. monarch picks this up via MONARCH_FLEET.
+from: source
+to: sink
+
 cells:
   source:
     databases:

@@ -234,6 +234,31 @@ def probe(
     return single
 
 
+def unseedable_tables(conn: psycopg.Connection, manifest: set[str]) -> set[str]:
+    """Manifest tables the seed must skip: their FK chain reaches a table outside the manifest --
+    a reverse-edge dependency the seed can't satisfy (the referent is never seeded) and the mover
+    doesn't move. Transitive: a table whose FK points at a skipped table is skipped too, since
+    that table won't have an anchor row to reference."""
+    edges: dict[str, set[str]] = {}
+    for child, parent in conn.execute(
+        """SELECT t.relname, r.relname FROM pg_constraint c
+           JOIN pg_class t ON t.oid = c.conrelid
+           JOIN pg_class r ON r.oid = c.confrelid
+           JOIN pg_namespace n ON n.oid = t.relnamespace AND n.nspname = 'public'
+           WHERE c.contype = 'f' AND t.relname <> r.relname"""
+    ).fetchall():
+        edges.setdefault(child, set()).add(parent)
+    skip = {t for t, parents in edges.items() if t in manifest and not parents <= manifest}
+    changed = True
+    while changed:
+        changed = False
+        for table, parents in edges.items():
+            if table in manifest and table not in skip and parents & skip:
+                skip.add(table)
+                changed = True
+    return skip
+
+
 def row_count(table: str, root: str, single: bool) -> int:
     if table == root or single:
         return 1  # the root carries the unique name; single-row tables collide past the anchor
@@ -253,6 +278,15 @@ def main() -> None:
 
     with connect_source(stores) as conn:
         schema = Schema(conn)
+        # Reverse-edge tables -- an enforced FK into an unmanaged table the seed can't satisfy and
+        # the mover doesn't move -- left empty rather than seeding a dangling reference. Computed
+        # live so it tracks the schema; on the source today that is these three, all pointing at
+        # workflow_engine_action: sentry_notificationmessage,
+        # workflow_engine_dataconditiongroupaction, workflow_engine_workflowactiongroupstatus.
+        skip = unseedable_tables(conn, set(tables))
+        if dropped := [t for t in seeded if t in skip]:
+            print(f"-- skipping reverse-edge tables: {', '.join(dropped)}", file=sys.stderr)
+        seeded = [t for t in seeded if t not in skip]
         single = {t: probe(conn, t, tables[t], root, schema, blobs, store_config) for t in seeded}
 
     print("BEGIN;")
