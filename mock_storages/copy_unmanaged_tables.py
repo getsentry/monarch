@@ -41,7 +41,9 @@ def copy_table(source: psycopg.Connection, sink: psycopg.Connection, table: str)
 def sink_database(cell: Cell) -> str:
     """The demo's sink colocates every store in one database."""
     if len(cell.databases) != 1:
-        raise ValueError(f"sink cell {cell.name!r} must be a single database, got {len(cell.databases)}")
+        raise ValueError(
+            f"sink cell {cell.name!r} must be a single database, got {len(cell.databases)}"
+        )
     return cell.databases[0].primary_dsn
 
 

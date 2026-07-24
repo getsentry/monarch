@@ -113,7 +113,7 @@ def convert_org_tree(org_tree: dict[str, Any]) -> dict[str, Any]:
     stores: dict[str, dict[str, str]] = {}
     for node in nodes:
         stores.setdefault(store_of(node), {"type": "postgres"})
-    for store in org_tree.get("externally-referenced-systems", {}):
+    for store in org_tree["externally_referenced_systems"]:
         stores[store] = {
             "type": "blob_store",
             "eviction": BLOB_EVICTION.get(store, "keep"),
@@ -130,7 +130,11 @@ def convert_org_tree(org_tree: dict[str, Any]) -> dict[str, Any]:
             spec["static"] = True
 
         refs: dict[str, dict[str, Any]] = {}
-        if (edge := node.get("parent_edge")) and edge["to_model"] not in excluded:
+        # TEMPORARY: the export scopes this by environment_id, which leaves the store. Delete once
+        # the exporter prefers a same-database parent.
+        if node["model_name"] == "monitors.monitorenvironment":
+            refs["monitor_id"] = {"parent": by_model["monitors.monitor"]["table_name"]}
+        elif (edge := node.get("parent_edge")) and edge["to_model"] not in excluded:
             refs[column_name(edge)] = {"parent": by_model[edge["to_model"]]["table_name"]}
 
         if INCLUDE_SPECIAL_FIELDS:
@@ -181,7 +185,7 @@ def store_of(node: dict[str, Any]) -> str:
 
 def external_refs_by_table(org_tree: dict[str, Any]) -> dict[str, list[tuple[str, str]]]:
     refs: dict[str, list[tuple[str, str]]] = defaultdict(list)
-    for store, entries in org_tree.get("externally-referenced-systems", {}).items():
+    for store, entries in org_tree["externally_referenced_systems"].items():
         for entry in entries:
             refs[entry["table_name"]].append((entry["field_name"], store))
     return refs
