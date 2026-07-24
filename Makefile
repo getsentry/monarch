@@ -5,8 +5,8 @@ COMPOSE := docker compose
 PSQL := $(COMPOSE) exec -T sink psql -U monarch -v ON_ERROR_STOP=1 -q
 SOURCE_PSQL := $(COMPOSE) exec -T source-primary psql -U monarch -v ON_ERROR_STOP=1 -q
 
-.PHONY: up down install databases schema data reset run demo verify snapshot opt-in-group \
-	traffic evict-sink psql-source psql-standby psql-files psql-sink \
+.PHONY: up down install databases schema schema-full-rebuild data reset run demo verify \
+	snapshot opt-in-group traffic evict-sink psql-source psql-standby psql-files psql-sink \
 	psql-ledger mock-schema test
 
 up:
@@ -110,10 +110,21 @@ traffic:
 # The default schema: build real Sentry at a pinned revision and apply its real schema across
 # every fleet database -- each store's tables on the database fleet.yaml assigns it, both cells.
 # Reproducible from nothing (no local Sentry checkout). Recreates the cell databases; the
-# migration leaves monarch_ledger alone, so set that up here too. Override the revision with
-# `make schema SENTRY_REF=<sha>`. See sentry-schema/README.md. (`make mock-schema` = toy schema.)
+# migration leaves monarch_ledger alone, so set that up here too. (`make mock-schema` = toy schema.)
+#
+# Fast by default: the slow part -- running Sentry's full migration history into a template db
+# per server -- happens once, then persists (stamped with its SENTRY_REF) and is reused. A repeat
+# run at the same ref skips the migrate and just clones+prunes (seconds), even across `make reset`.
+# Bump the revision with `make schema SENTRY_REF=<sha>` (mismatched stamp -> auto re-migrate).
+# `make schema-full-rebuild` forces the full migrate (suspect/corrupt template). See sentry-schema/README.md.
 schema:
 	$(COMPOSE) run --rm --build sentry-migrate
+	uv run monarch init-ledger
+
+# The old, always-slow path: rebuild the template from a full Sentry migrate even if the stamp
+# matches. Use when the persisted template looks wrong; `make schema` is the everyday command.
+schema-full-rebuild:
+	$(COMPOSE) run --rm --build -e MONARCH_REMIGRATE=1 sentry-migrate
 	uv run monarch init-ledger
 
 # Opt one update-heavy table into update/delete filtering for demo

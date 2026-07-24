@@ -21,6 +21,11 @@ colocation-agnostic: it comes from `fleet.yaml` (database → stores) and the ma
 store), so the sink keeps every table (identical to monolith Sentry) and each source database
 keeps only its own.
 
+The `sentry_template` database persists between runs, stamped with the `SENTRY_REF` it was
+migrated at. The migration — the slow part — runs only when that stamp is missing or stale, so a
+repeat `make schema` at the same ref reuses the template and just clones+prunes (seconds),
+including after `make reset`. Bumping the pin (`make schema SENTRY_REF=<sha>`) invalidates the
+stamp and re-migrates; `make schema-full-rebuild` forces a fresh migrate regardless of the stamp.
+
 Recreates the cell databases (`source*`, `sink`), replacing whatever was there;
-`monarch_ledger` is untouched (`make schema` sets it up separately). Bump the pin deliberately:
-`make schema SENTRY_REF=<sha>`.
+`monarch_ledger` is untouched (`make schema` sets it up separately).

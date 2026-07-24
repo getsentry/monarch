@@ -27,6 +27,9 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 # Bump this to move to a newer Sentry; it is the sole reproducibility anchor.
 ARG SENTRY_REF=c310f09830044dae87d3e456785eaee9186bbc81
 ENV SENTRY_SRC=/sentry
+# Exposed to the entrypoint so it can stamp the template with the ref it was built at and
+# reuse it across runs (see apply_schema.py).
+ENV SENTRY_REF=${SENTRY_REF}
 
 # Shallow, pinned fetch: the revision anchors reproducibility, --depth 1 keeps it small.
 RUN git init "$SENTRY_SRC" \

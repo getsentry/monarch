@@ -24,6 +24,12 @@ FLEET_PATH = "/monarch/fleet.yaml"
 MANIFEST_PATH = "/monarch/manifest.generated.yaml"
 TEMPLATE_DB = "sentry_template"
 
+# The template is migrated once (the slow part) and kept, stamped with the SENTRY_REF it was
+# built at (set as an ENV in the Dockerfile). A later run at the same ref reuses it -- clone +
+# prune only. MONARCH_REMIGRATE=1 (make schema-full-rebuild) forces a fresh migrate regardless.
+SENTRY_REF = os.environ.get("SENTRY_REF", "")
+FORCE_REMIGRATE = os.environ.get("MONARCH_REMIGRATE") == "1"
+
 # CREATE/DROP DATABASE can't run from inside the database being changed, so every database-level
 # statement connects here instead: the default maintenance database, always present and never a
 # fleet target (so it is never itself the database being dropped or cloned).
@@ -50,9 +56,24 @@ def connect(host: str, port: int, dbname: str) -> psycopg2.extensions.connection
     return conn
 
 
-def migrate_template(host: str, port: int) -> None:
-    """Run Sentry's real migrations into a fresh template database on this server."""
+def stamped_ref(cur) -> str | None:
+    """The SENTRY_REF the template was migrated at, or None when there's no template yet."""
+    cur.execute(
+        "SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = %s",
+        (TEMPLATE_DB,),
+    )
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def ensure_template(host: str, port: int) -> None:
+    """Migrate Sentry's real schema into the template database, then keep it for reuse. A run at
+    the same SENTRY_REF (and without MONARCH_REMIGRATE) reuses the existing template, skipping the
+    slow migrate; the databases are cloned from it either way."""
     with closing(connect(host, port, MAINTENANCE_DB)) as conn, conn.cursor() as cur:
+        if not FORCE_REMIGRATE and stamped_ref(cur) == SENTRY_REF:
+            print(f"--> reusing template on {host}:{port} (ref {SENTRY_REF[:12]})", flush=True)
+            return
         cur.execute(f"DROP DATABASE IF EXISTS {TEMPLATE_DB} WITH (FORCE)")
         cur.execute(f"CREATE DATABASE {TEMPLATE_DB}")
     env = {
@@ -65,6 +86,8 @@ def migrate_template(host: str, port: int) -> None:
     }
     print(f"--> migrating full Sentry schema into {host}:{port}/{TEMPLATE_DB}", flush=True)
     subprocess.run(["sentry", "django", "migrate", "--noinput"], env=env, check=True)
+    with closing(connect(host, port, MAINTENANCE_DB)) as conn, conn.cursor() as cur:
+        cur.execute(f"COMMENT ON DATABASE {TEMPLATE_DB} IS %s", (SENTRY_REF,))
 
 
 def clone_and_prune(
@@ -110,11 +133,9 @@ def main() -> None:
             by_server[(host, port)].append((dsn["dbname"], keep, keep_unmanaged))
 
     for (host, port), databases in by_server.items():
-        migrate_template(host, port)
+        ensure_template(host, port)
         for dbname, keep, keep_unmanaged in databases:
             clone_and_prune(host, port, dbname, keep, keep_unmanaged, managed)
-        with closing(connect(host, port, MAINTENANCE_DB)) as conn, conn.cursor() as cur:
-            cur.execute(f"DROP DATABASE IF EXISTS {TEMPLATE_DB} WITH (FORCE)")
 
 
 if __name__ == "__main__":
