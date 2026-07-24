@@ -172,8 +172,10 @@ def cmd_snapshot(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: 
                 unit.transition(move.UnitStatus.COPIED, note=f"{total} key(s) recorded")
             print("\nblob keys recorded in the ledger; streams derive membership from the sink")
         except BaseException as e:
-            # release the claim create() took: a dead live row would block every future move
-            m.transition(move.Phase.ABORTED, note=repr(e))
+            # a failure before any claim releases the lease create() took (a dead live row would
+            # block every future move); one after it holds the lease for the sink scrub
+            m.add_event(repr(e))
+            m.give_up()
             raise
 
 
@@ -230,15 +232,19 @@ def cmd_stream(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: st
 def cmd_evict(
     org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: str, move_id: int
 ) -> None:
-    """Abort's sink scrub: delete the doomed partial copy from the sink in one whole-graph
-    pass, post-terminal cleanup with no phase change. The finalize-path eviction of the source
-    is worker-driven -- each store's worker deletes its own rows and marks its unit evicted."""
+    """Abort's sink scrub: delete the doomed partial copy from the sink in one whole-graph pass,
+    then close the move (aborting -> aborted). The finalize-path eviction of the source is
+    worker-driven -- each store's worker deletes its own rows and marks its unit evicted."""
     with connect(ledger_dsn) as book:
-        cell = cells[move.Move(book, move_id).cells()[1]]  # the move's sink
-    # Refuse while any of the org's slots survive on the cell: a live stream would replicate
+        m = move.Move(book, move_id)
+        sink = cells[m.cells()[1]]
+        phase = m.phase()
+        if phase is not move.Phase.ABORTING:
+            sys.exit(f"move #{move_id} is not aborting (phase {phase}) -- nothing to scrub")
+    # Refuse while any of the org's slots survive on the sink: a live stream would replicate
     # the eviction to the sink as ordinary deletes (evict.py). Checked per database on the
     # decode endpoint -- slots live where decoding happens.
-    for db in cell.databases:
+    for db in sink.databases:
         with connect(db.decode_dsn) as decode:
             for store in db.stores:
                 name = slot.slot_name(org_id, store)
@@ -249,21 +255,22 @@ def cmd_evict(
                     sys.exit(f"slot {name} still exists -- run drop-slot first")
     with ExitStack() as stack:
         conns = {
-            db.primary_dsn: stack.enter_context(connect(db.primary_dsn)) for db in cell.databases
+            db.primary_dsn: stack.enter_context(connect(db.primary_dsn)) for db in sink.databases
         }
-        buckets = {name: Bucket(loc["file_path"]) for name, loc in cell.blobs.items()}
+        buckets = {name: Bucket(loc["file_path"]) for name, loc in sink.blobs.items()}
         rows_by_store, blobs_by_store = run_evict(
-            conns, cell, graph, org_id, buckets, graph.topological_sort()
+            conns, sink, graph, org_id, buckets, graph.topological_sort()
         )
-    # journal the per-store counts for the feed; no unit transitions here (abort leaves units
-    # at slot_dropped, the finalize path drives them to evicted in the workers)
+    # journal the per-store counts for the feed, then close. No unit transitions here (abort leaves
+    # units at slot_dropped, the finalize path drives them to evicted in the workers)
     with connect(ledger_dsn) as book:
         m = move.Move(book, move_id)
         for store, rows in rows_by_store.items():
-            move.MoveUnit(m, store).add_event(f"evicted from {cell.name}: {rows} row(s)")
+            move.MoveUnit(m, store).add_event(f"evicted from {sink.name}: {rows} row(s)")
         for store, objects in blobs_by_store.items():
-            move.MoveUnit(m, store).add_event(f"evicted from {cell.name}: {objects} object(s)")
-        m.add_event(f"org evicted from {cell.name}")
+            move.MoveUnit(m, store).add_event(f"evicted from {sink.name}: {objects} object(s)")
+        m.add_event(f"org evicted from {sink.name}")
+        m.transition(move.Phase.ABORTED, note="sink copy scrubbed — nothing left outstanding")
 
 
 def main() -> None:
@@ -302,7 +309,7 @@ def main() -> None:
         "worker", help="Run one store's mover: it picks up the live move and drives its store"
     )
     p.add_argument("--store", required=True, help="the postgres store this worker owns")
-    p = sub.add_parser("evict", help="Scrub the aborted move's partial copy from its sink")
+    p = sub.add_parser("evict", help="Scrub an aborting move's partial copy from its sink")
     p.add_argument("--org-id", type=int, required=True)
     p.add_argument(
         "--move-id", type=int, required=True, help="move to journal the eviction against"

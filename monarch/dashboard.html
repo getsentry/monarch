@@ -235,7 +235,7 @@
 <script>
 const $ = id => document.getElementById(id);
 const PILL = { active: "run", draining: "warn", cut_over: "warn", evicting: "warn",
-               finalized: "ok", reverting: "bad", aborted: "bad" };
+               aborting: "warn", finalized: "ok", reverting: "bad", aborted: "bad" };
 const fmt = n => Number(n).toLocaleString("en-US");
 const fmtBytes = n => n < 1024 ? `${n} B`
   : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
@@ -306,9 +306,6 @@ async function pollMoves() {
 // copy timings come from the journal (transitions carry timestamps; unit rows deliberately
 // don't) -- the full feed replays on load, so these are always reconstructible
 const unitTimes = {};
-// whether the abort sink scrub has run (it journals "org evicted from sink"); disarms the
-// scrub button. Source eviction is worker-driven and shows per-store, so it needs no flag here
-let evicted = false;
 // blob stores are units too but hold no slot/publication
 const blobStores = new Set();
 
@@ -414,7 +411,7 @@ function appendEvents(events) {
       else if (e.message.startsWith("-> copied")) t.copied = e.at;
       // old journals ended the copy on "-> streaming"; ??= keeps new moves' earlier mark
       else if (e.message.startsWith("-> streaming")) t.copied ??= e.at;
-    } else if (e.message.startsWith("org evicted")) evicted = true;
+    }
     const li = document.createElement("li");
     const t = document.createElement("span"); t.className = "t";
     t.textContent = new Date(e.at).toLocaleTimeString("en-GB");
@@ -518,10 +515,15 @@ $("actions-toggle").addEventListener("click", () => $("drawer").classList.toggle
 if (pinned) $("orgpick").style.display = "none";  // pre-move: picking happens on the index
 $("orgpick").addEventListener("change", renderActions);
 
-// each action: arm() returns null when armed, else the unmet gate (tooltip text).
+// each action: arm() returns null when armed, else the unmet gate (tooltip text). optional
+// show() is availability of a different kind -- whether the step belongs to this move's story at
+// all (a closed move's cleanup steps don't) -- so the panel stays visible-but-disabled by default
+// and only drops a button when it would be meaningless.
 // pre-move actions live on the index page only -- a move id exists only after
 // registration, so a move's page can't host the actions that precede it.
 // an action with run() is wired; the rest are inert until built (`would` = the plan)
+const openMove = m => !m || !TERMINAL.has(m.phase);
+const requireAborting = m => m?.phase === "aborting" ? null : "needs an aborting move";
 const ACTIONS = [
   { label: "register move", pre: true,
     run: async note => {
@@ -600,20 +602,31 @@ const ACTIONS = [
     run: async note => {
       const { ok, status, body } = await post("/abort", { move: +pinned });
       if (!ok) { note(body.error ?? `failed (${status}) — restart \`monarch dashboard\`?`); return false; }
-      note("aborted — slots + publications dropped, org never left the source; scrub sink copy is armed");
+      note("abort submitted — slots + publications dropped, org never left the source; the feed says which exit it took");
       return true;
     },
     arm: m => !m || !["active", "draining"].includes(m.phase) ? "nothing abortable"
       : streaming ? "stop the streams first — a unit is still streaming" : null },
   { label: "scrub sink copy",
+    show: openMove,
     run: async note => {
       const { ok, status, body } = await post("/scrub-sink", { move: +pinned });
       if (!ok) { note(body.error ?? `failed (${status}) — restart \`monarch dashboard\`?`); return false; }
-      note("evict spawned — the journal confirms when the sink's partial copy is gone");
+      note("evict spawned — the journal confirms when the sink's partial copy is gone, and the move closes with it");
       return true;
     },
-    arm: m => !m || m.phase !== "aborted" ? "needs an aborted move"
-      : evicted ? "sink copy already scrubbed" : null },
+    arm: requireAborting },
+  { label: "close without scrubbing", danger: true,
+    // the escape hatch: aborting holds the lease, so a scrub that can't be made to work would
+    // block every future move
+    show: openMove,
+    run: async note => {
+      const { ok, status, body } = await post("/close-dirty", { move: +pinned });
+      if (!ok) { note(body.error ?? `failed (${status}) — restart \`monarch dashboard\`?`); return false; }
+      note("closed with the sink copy still present — the journal records what was left behind");
+      return true;
+    },
+    arm: requireAborting },
 ];
 
 // fired-but-not-yet-landed latch: a clicked run() button stays disabled until its effect
@@ -630,6 +643,7 @@ function renderActions() {
   $("orgpick").title = busy ? "a live move exists — one move at a time" : "";
   $("actionbtns").innerHTML = ACTIONS.map((a, i) => {
     if (!!a.pre === !!pinned) return "";
+    if (a.show && !a.show(lastMove)) return "";
     const gate = a.arm(lastMove);
     if (!gate && fired.has(a.label))
       return `<button class="btn fired" data-i="${i}" disabled

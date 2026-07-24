@@ -9,7 +9,8 @@ CREATE TABLE IF NOT EXISTS move (
     -- is derived from move_unit rows, never stored here. born active: the insert is the lease
     phase       text        NOT NULL DEFAULT 'active'
         CONSTRAINT move_phase_check CHECK (phase IN
-            ('active', 'draining', 'cut_over', 'evicting', 'failed', 'finalized', 'reverting', 'aborted')),
+            ('active', 'draining', 'cut_over', 'evicting', 'failed', 'finalized', 'reverting',
+             'aborting', 'aborted')),
     created_at  timestamptz NOT NULL DEFAULT now(),
     updated_at  timestamptz NOT NULL DEFAULT now()
 );

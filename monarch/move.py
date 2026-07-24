@@ -27,6 +27,7 @@ class Phase(StrEnum):
     FAILED = "failed"
     FINALIZED = "finalized"
     REVERTING = "reverting"
+    ABORTING = "aborting"
     ABORTED = "aborted"
 
 
@@ -41,7 +42,7 @@ class UnitStatus(StrEnum):
     disagree. evicting is the finalize path's next step -- the worker's trigger to delete this
     store's source rows + blobs, set once teardown is done, like copying/streaming; evicted is
     the result, and the move finalizes once every unit reaches it. slot_dropped stays terminal
-    on the abort path (the sink scrub is post-terminal cleanup)."""
+    on the abort path (the sink scrub deletes sink rows and moves no unit)."""
 
     PENDING = "pending"
     COPYING = "copying"
@@ -53,10 +54,13 @@ class UnitStatus(StrEnum):
 
 
 # The move's state machine (domain shape, not storage -- executed here because transitions
-# run here): state -> states legally reachable in one step. Forward-only. Pre-flip, giving
-# up is terminal directly (aborted: move dead, org never left the source -- lossless; sink
-# scrub is post-terminal inspect-then-act work, no phase needed). Post-flip the source copy
-# is removed before the close: cut_over -> evicting (slots/pubs dropped, then the org's
+# run here): state -> states legally reachable in one step. Forward-only. Pre-flip, giving up
+# ends in aborted (move dead, org never left the source -- lossless): directly when nothing was
+# copied, else through aborting -- give-up recorded, sink still holding a partial copy, and
+# deliberately non-terminal so the one-move lease is held until that copy is gone and a later
+# move can't collide with it. From aborting the operator picks the ending: scrub it clean, or
+# close it dirty to take the lease back (same edge, the note says which). Post-flip the source
+# copy is removed before the close: cut_over -> evicting (slots/pubs dropped, then the org's
 # source rows + blobs deleted) -> finalized (source gone, org only in the sink -- the true
 # point of no return). The emergency escape cut_over -> reverting -> aborted (routing flips
 # back to the source, sink writes since the flip lost) is offered ONLY from cut_over: once
@@ -66,11 +70,12 @@ class UnitStatus(StrEnum):
 # up? every unit evicted?) are the caller's conditions for *attempting* a transition; these
 # maps only define which transitions exist.
 MOVE_TRANSITIONS: dict[Phase, set[Phase]] = {
-    Phase.ACTIVE: {Phase.DRAINING, Phase.FAILED, Phase.ABORTED},
-    Phase.DRAINING: {Phase.CUT_OVER, Phase.FAILED, Phase.ABORTED},
+    Phase.ACTIVE: {Phase.DRAINING, Phase.ABORTING, Phase.FAILED, Phase.ABORTED},
+    Phase.DRAINING: {Phase.CUT_OVER, Phase.ABORTING, Phase.FAILED, Phase.ABORTED},
     Phase.CUT_OVER: {Phase.EVICTING, Phase.REVERTING, Phase.FAILED},
     Phase.EVICTING: {Phase.FINALIZED, Phase.FAILED},  # no revert: the source is being deleted
     Phase.REVERTING: {Phase.FAILED, Phase.ABORTED},
+    Phase.ABORTING: {Phase.ABORTED},
     Phase.FAILED: {Phase.ABORTED},
     Phase.FINALIZED: set(),
     Phase.ABORTED: set(),
@@ -140,6 +145,24 @@ class Move:
             if moved:
                 self.add_event(f"phase -> {to}" + (f": {note}" if note else ""))
         return moved
+
+    def wrote_to_sink(self) -> bool:
+        """True if there is any chance the sink has anything written to it."""
+        return self.conn.execute(
+            "SELECT bool_or(status != 'pending') FROM move_unit WHERE move_id = %s", (self.id,)
+        ).fetchone()[0]
+
+    def give_up(self) -> Phase | None:
+        """Take the give-up exit the sink picks: aborting when it may hold a partial copy the scrub
+        has to clear before the move can close, aborted when nothing can have been written. Both
+        give-up paths come through here, so neither can close over a dirty sink. None = the phase
+        moved underneath the caller."""
+        phase, note = (
+            (Phase.ABORTING, "partial copy left in the sink — scrub it to close the move")
+            if self.wrote_to_sink()
+            else (Phase.ABORTED, "no snapshot ran — the sink was never written")
+        )
+        return phase if self.transition(phase, note=note) else None
 
     def add_event(self, message: str) -> None:
         """Org-level journal line (unit NULL); unit-scoped lines go through MoveUnit."""

@@ -185,6 +185,8 @@ class Handler(BaseHTTPRequestHandler):
             self._transition(body, move.UnitStatus.EVICTING, "evict requested")
         elif path == "/scrub-sink":
             self._scrub_sink(body)
+        elif path == "/close-dirty":
+            self._close_dirty(body)
         elif path == "/abort":
             self._abort(body)
         else:
@@ -284,7 +286,9 @@ class Handler(BaseHTTPRequestHandler):
         evicting, abort into aborted -- so no move reaches a closed phase (which frees the
         one-move lease for the next move) with source plumbing still live to collide with.
         Idempotent: both drops no-op on an absent object, so a re-run after a partial failure
-        is safe. Slots before publications: a publication outlives the slot that reads it."""
+        is safe. Slots before publications: a publication outlives the slot that reads it. Units
+        still pending stay put -- pending's only exit is copying -- which is what makes them the
+        never-copied record wrote_to_sink reads."""
         slot.drop_org_slots(source, org)
         slot.drop_org_publications(source, org)
         # name the dropped publications in the slot_dropped marker itself (one line, not a
@@ -330,10 +334,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _scrub_sink(self, body) -> None:
         """Abort's sink scrub: spawn the central evict against the sink to delete the doomed
-        partial copy (post-terminal cleanup, no phase change). The finalize-path source
-        eviction is worker-driven instead -- the /evict-source route just moves the units to
-        `evicting` and each store's worker deletes its own. The CLI journals its per-store
-        counts, which the page's gate watches."""
+        partial copy, which is what closes an aborting move. The finalize-path source eviction is
+        worker-driven instead -- the /evict-source route just moves the units to `evicting` and
+        each store's worker deletes its own."""
         try:
             move_id = int(body["move"])
         except KeyError, TypeError, ValueError:
@@ -342,8 +345,8 @@ class Handler(BaseHTTPRequestHandler):
         row = self.conn.execute(
             "SELECT root_id, phase FROM move WHERE id = %s", (move_id,)
         ).fetchone()
-        if row is None or row[1] != "aborted":
-            self._respond(409, "application/json", _to_json({"error": "needs an aborted move"}))
+        if row is None or row[1] != "aborting":
+            self._respond(409, "application/json", _to_json({"error": "needs an aborting move"}))
             return
         args = [
             sys.executable,
@@ -359,9 +362,25 @@ class Handler(BaseHTTPRequestHandler):
         print(f"{datetime.now():%H:%M:%S} spawned `monarch {' '.join(args[3:])}` (pid {proc.pid})")
         self._respond(202, "application/json", _to_json({"spawned": "evict"}))
 
+    def _close_dirty(self, body) -> None:
+        """Close an aborting move without cleaning the sink: trades a dirty sink for the lease it
+        holds, when the scrub can't be made to work. The note is what tells the two closes
+        apart -- aborted is multi-source, so the phase is read rather than left to the map."""
+        try:
+            move_id = int(body["move"])
+        except KeyError, TypeError, ValueError:
+            self._respond(400, "application/json", _to_json({"error": "expected {move}"}))
+            return
+        m = move.Move(self.conn, move_id)
+        if m.phase() is not move.Phase.ABORTING:
+            self._respond(409, "application/json", _to_json({"error": "needs an aborting move"}))
+            return
+        m.transition(move.Phase.ABORTED, note="closed with the sink copy still present")
+        self._respond(200, "application/json", _to_json({"phase": "aborted"}))
+
     def _abort(self, body) -> None:
-        """Abort the move: tear down the source plumbing, then flip to the terminal aborted
-        phase. Teardown precedes the flip deliberately -- a move must not reach a closed phase
+        """Abort the move: tear down the source plumbing, then take the give-up exit (give_up picks
+        which). Teardown precedes the flip deliberately -- a move must not reach a closed phase
         (which frees the one-move lease for the next move) with slots or publications still
         live. A teardown failure raises before the flip, so the phase stays put, the abort is
         re-runnable, and no new move can start meanwhile."""
@@ -384,8 +403,9 @@ class Handler(BaseHTTPRequestHandler):
         m = move.Move(self.conn, move_id)
         m.add_event("operator requested abort — org never left the source")
         self._tear_down(m, source, org)
-        if m.transition(move.Phase.ABORTED):
-            self._respond(200, "application/json", _to_json({"aborted": move_id}))
+        phase = m.give_up()
+        if phase:
+            self._respond(200, "application/json", _to_json({"phase": phase}))
         else:
             self._respond(
                 409,
