@@ -122,11 +122,20 @@ def create_publications(
     # publish_via_partition_root: a partitioned table's changes decode as the root relation,
     # not grouping_records_p37-style leaf partitions the graph has never heard of. No effect
     # on unpartitioned tables.
+    def publication(name: str, filters: dict[str, str | None], publish: str) -> str:
+        # a store can have no copyable tables at all (every one of them excluded from the
+        # manifest). A table-less publication is legal and replicates nothing, where FOR TABLE
+        # with an empty list is a syntax error -- and creating the pair either way keeps the
+        # publication_exists gates and the stream's publication list free of a special case.
+        for_tables = f" FOR TABLE\n  {render(filters)}\n" if filters else " "
+        return (
+            f"CREATE PUBLICATION {name}{for_tables}"
+            f"WITH ({publish}, publish_via_partition_root = true)"
+        )
+
     statements = [
-        f"CREATE PUBLICATION {ins} FOR TABLE\n  {render(ins_filters)}\n"
-        "WITH (publish = 'insert', publish_via_partition_root = true)",
-        f"CREATE PUBLICATION {mut} FOR TABLE\n  {render(mut_filters)}\n"
-        "WITH (publish = 'update, delete, truncate', publish_via_partition_root = true)",
+        publication(ins, ins_filters, "publish = 'insert'"),
+        publication(mut, mut_filters, "publish = 'update, delete, truncate'"),
     ]
     for statement in statements:
         admin.execute(trust_sql(statement))

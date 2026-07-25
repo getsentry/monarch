@@ -19,7 +19,7 @@ import yaml
 
 from dependencies import FLEET
 
-from generate_data import Schema, build_row, probe, unseedable_tables
+from generate_data import Schema, build_row, probe
 
 from monarch.cli import CONFIG as MANIFEST
 from monarch.config import Graph, PostgresStore, load_graph
@@ -168,11 +168,7 @@ def main() -> None:
     orgs = read_orgs(graph, conns)
     align_sequences(graph, conns)
     schemas, single = introspect(graph, databases, conns, blobs, store_config)
-    # Skip the same reverse-edge tables the seed skips -- a write into one sets an FK to an
-    # unmanaged anchor that doesn't exist. Computed per source database (one conn each), so the
-    # cross-store cases that aren't enforced here fall out, leaving the workflow_engine_action set.
-    skip = set().union(*(unseedable_tables(c, set(graph.store_of)) for c in set(conns.values())))
-    tables = [t for t in writable_tables(graph, conns) if not single[t] and t not in skip]
+    tables = [t for t in writable_tables(graph, conns) if not single[t]]
     # Weight org selection: --bias-org draws --bias-weight times as often as any other org.
     weights = [args.bias_weight if o == args.bias_org else 1.0 for o in orgs]
     bias = f", org {args.bias_org} at {args.bias_weight}x" if args.bias_org else ""

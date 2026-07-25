@@ -47,10 +47,50 @@ EXCLUDED_STORES = {"control"}
 # sentry.fileblob: the FileBlob island root -- a content-addressed blob store shared across orgs,
 # with no org column of its own (see the uptime note above). Everything unscopable descends from
 # it: sentry.file (blob_id -> fileblob), sentry.fileblobindex (blob_id -> fileblob), and
-# sentry.relocationfile (file_id -> file) all fall out via the orphan cascade below. Excluding the
-# root CASCADE-drops the inbound foreign keys, so the org-scoped tables that point at files
-# (artifactbundle, releasefile, ...) still move, carrying file_id as a plain column.
-EXCLUDED_MODELS = {"uptime.uptimeresponsecapture", "workflow_engine.action", "sentry.fileblob"}
+# sentry.relocationfile (file_id -> file) all fall out via the orphan cascade below.
+#
+# ...and so do its referencers, listed one by one below. The orphan cascade can't reach them: a
+# table like sentry.fileblobowner is scoped by organization_id and only *also* points at the
+# island, so dropping the root leaves it in the manifest with a dangling ref. That ref is a real
+# constraint wherever both tables sit in one database -- which is every database hosting the
+# `default` store, including the whole sink -- so the copy hits a ForeignKeyViolation on arrival.
+# Excluded by hand rather than derived: the constraint that proves the dependency is CASCADE-dropped
+# in some databases and kept in others, so no single database can be introspected for it. Add a line
+# when a table breaks. The whole block goes away when the file cluster gets FileBlobIndex-derived
+# membership (FILEBLOBS.md) -- these are real org data, not junk.
+EXCLUDED_MODELS = {
+    "uptime.uptimeresponsecapture",
+    "workflow_engine.action",
+    "sentry.fileblob",
+    # referencers of the FileBlob island
+    "preprod.installablepreprodartifact",
+    "preprod.preprodartifact",
+    "preprod.preprodartifactmobileappinfo",
+    "preprod.preprodartifactsizecomparison",
+    "preprod.preprodartifactsizemetrics",
+    "preprod.preprodcomparisonapproval",
+    "preprod.preprodsnapshotcomparison",
+    "preprod.preprodsnapshotmetrics",
+    "replays.replayrecordingsegment",
+    "sentry.artifactbundle",
+    "sentry.artifactbundleindex",
+    "sentry.debugidartifactbundle",
+    "sentry.exporteddata",
+    "sentry.exporteddatablob",
+    "sentry.fileblobowner",
+    "sentry.organizationavatar",
+    "sentry.proguardartifactrelease",
+    "sentry.projectartifactbundle",
+    "sentry.projectdebugfile",
+    "sentry.releaseartifactbundle",
+    "sentry.releasefile",
+    "sentry.teamavatar",
+    # referencers of workflow_engine.action, same shape (these are the three the seed's live
+    # reverse-edge check used to catch, back when it derived this list itself)
+    "notifications.notificationmessage",
+    "workflow_engine.dataconditiongroupaction",
+    "workflow_engine.workflowactiongroupstatus",
+}
 INCLUDE_SPECIAL_FIELDS = True
 BLOB_EVICTION = {
     "filestore": "keep",
