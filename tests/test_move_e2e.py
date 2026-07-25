@@ -1,8 +1,7 @@
 """End-to-end move: drive the real `monarch` CLI through a full move of every store EXCEPT files,
 then assert org 1 landed in the sink and org 2 never crossed. The content-addressed files store
-isn't movable yet (its tables have no foreign-key path back to an organization, so monarch refuses
-them with UnscopableTable; the scope handling lives in tests/test_scope.py), so it's dropped from
-the manifest+fleet this move runs against.
+isn't movable yet (its tables have no foreign-key path back to an organization), so it's dropped
+from the manifest+fleet this move runs against.
 """
 
 import os
