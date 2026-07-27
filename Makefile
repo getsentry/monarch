@@ -4,10 +4,11 @@ COMPOSE := docker compose
 # to the source-standby, where monarch reads)
 PSQL := $(COMPOSE) exec -T sink psql -U monarch -v ON_ERROR_STOP=1 -q
 SOURCE_PSQL := $(COMPOSE) exec -T source-primary psql -U monarch -v ON_ERROR_STOP=1 -q
+BENCH_COMPOSE := $(COMPOSE) -f bench/compose.yaml
 
 .PHONY: up down install databases schema schema-full-rebuild data reset run demo verify \
 	snapshot opt-in-group traffic evict-sink psql-source psql-standby psql-files psql-sink \
-	psql-ledger mock-schema test
+	psql-ledger mock-schema test bench bench-down bench-schema
 
 up:
 	$(COMPOSE) up -d
@@ -23,6 +24,26 @@ install:
 # sink. Independent of `make up`/the dev stack; requires docker. See tests/.
 test:
 	uv run pytest tests/ -v
+
+# Snapshot and stream throughput, against an isolated pair on its own ports (bench/compose.yaml).
+# Volumes are destroyed either side so every run starts from an empty sink -- a warm cache flatters
+# the result, and the sink is memory-starved on purpose to keep indexes off it. ~15-35 min, most of
+# it the 20M-row indexed copy. After a Ctrl-C, `make bench-down` clears the pair.
+bench:
+	$(BENCH_COMPOSE) down -v
+	$(BENCH_COMPOSE) up -d --wait
+	uv run python -m bench.snapshot
+	uv run python -m bench.stream
+	$(BENCH_COMPOSE) down -v
+
+bench-down:
+	$(BENCH_COMPOSE) down -v
+
+# Regenerate bench/schema.sql from the pinned Sentry schema (needs `make schema` first). The file
+# is committed so `make bench` needs no demo stack, and carries the SENTRY_REF it came from -- so
+# re-running this after bumping the pin shows whether the benched DDL actually moved.
+bench-schema:
+	uv run python -m bench.dump_schema
 
 # The fleet's databases (fleet.yaml): source + source_files + source_metrics on the pair, sink + monarch_ledger
 # on the pg14 instance (the ledger = monarch's own move state; colocation is demo convenience,

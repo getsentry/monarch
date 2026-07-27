@@ -1,0 +1,69 @@
+# Isolated pair for the bench/ suite. Separate ports and volumes from the demo sandbox
+# (compose.yaml) so both can run at once.
+#
+# The sink is deliberately memory-starved: 1 GB container, 128 MB shared_buffers. Indexes larger
+# than that must be read from disk, which is what production does on multi-terabyte indexes. Without
+# the cap every index stays resident and the measured rate is meaningless.
+#
+#   docker compose -f bench/compose.yaml up -d
+#   .venv/bin/python -m bench.snapshot
+#   .venv/bin/python -m bench.stream
+services:
+  bench-source:
+    image: postgres:16
+    # no cap: the source only streams COPY out, and a slow reader would understate the sink
+    command: ["postgres", "-c", "shared_buffers=1GB", "-c", "fsync=off"]
+    environment:
+      POSTGRES_USER: monarch
+      POSTGRES_PASSWORD: monarch
+      POSTGRES_DB: bench
+    ports:
+      - "5443:5432"
+    volumes:
+      - bench_source_data:/var/lib/postgresql/data
+    healthcheck:
+      # -h forces TCP: without it pg_isready checks the unix socket, which is up during the
+      # entrypoint's temporary initdb server -- so `up --wait` returns before the real server is
+      # listening on the mapped port and the bench gets a connection refused. -d avoids probing a
+      # `monarch` database that does not exist, which otherwise floods the log once a second.
+      test: ["CMD-SHELL", "pg_isready -U monarch -d bench -h 127.0.0.1"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  bench-sink:
+    image: postgres:14 # matches Sentry's major version, as the demo sandbox does
+    # shared_buffers well below the index size forces real page reads; the container mem_limit
+    # bounds the host page cache too, which shared_buffers alone cannot do
+    command:
+      - postgres
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - effective_cache_size=512MB
+      - -c
+      - max_wal_size=4GB
+      - -c
+      - track_io_timing=on
+    mem_limit: 1g
+    environment:
+      POSTGRES_USER: monarch
+      POSTGRES_PASSWORD: monarch
+      POSTGRES_DB: bench
+    ports:
+      - "5442:5432"
+    volumes:
+      - bench_sink_data:/var/lib/postgresql/data
+    healthcheck:
+      # -h forces TCP: without it pg_isready checks the unix socket, which is up during the
+      # entrypoint's temporary initdb server -- so `up --wait` returns before the real server is
+      # listening on the mapped port and the bench gets a connection refused. -d avoids probing a
+      # `monarch` database that does not exist, which otherwise floods the log once a second.
+      test: ["CMD-SHELL", "pg_isready -U monarch -d bench -h 127.0.0.1"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  bench_source_data:
+  bench_sink_data:
