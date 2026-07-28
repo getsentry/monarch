@@ -25,7 +25,7 @@
   body { margin: 0; background: var(--page); color: var(--ink);
          font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
   .wrap { max-width: 1230px; margin: 0 auto; padding: 18px 24px 40px; }
-  .layout { display: grid; grid-template-columns: 1fr 290px; gap: 16px; align-items: start; }
+  .layout { display: grid; grid-template-columns: 1fr 300px; gap: 16px; align-items: start; }
   .main { min-width: 0; }
   .side { display: grid; gap: 16px; }
   @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
@@ -66,6 +66,10 @@
           border-radius: 10px; padding: 14px 16px; }
   .card h2 { font-size: 12px; font-weight: 600; letter-spacing: 0.06em;
              text-transform: uppercase; color: var(--muted); margin: 0 0 10px; }
+  .card h2 .help { display: inline-flex; align-items: center; justify-content: center;
+                   width: 13px; height: 13px; margin-left: 6px; vertical-align: 1px;
+                   border: 1px solid var(--border); border-radius: 999px;
+                   font-size: 9px; color: var(--muted); cursor: help; }
 
   /* ---- topology (structure from config, status tint from the ledger) ---- */
   #topo { margin-bottom: 16px; }
@@ -132,7 +136,7 @@
              background: var(--surface); color: var(--ink);
              border: 1px solid var(--border); }
   #orgpick:disabled { cursor: not-allowed; opacity: 0.55; }
-  #tip { position: fixed; z-index: 10; display: none; max-width: 300px;
+  #tip { position: fixed; z-index: 10; display: none; max-width: 340px;
          background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
          padding: 8px 12px; font-size: 12px; line-height: 1.5; color: var(--ink-2);
          box-shadow: 0 4px 14px rgba(0, 0, 0, 0.14); pointer-events: none; }
@@ -156,11 +160,15 @@
             margin: 1px 0 7px; }
   .lagbar div { height: 100%; width: 0%; background: var(--blue); border-radius: 2px;
                 transition: width 0.3s, background 0.3s; }
-  #streamrows .kv, #drainrows .kv { font-size: 12.5px; margin-top: 0; padding: 2px 0; }
-  #streamrows .kv span:last-child, #drainrows .kv span:last-child { color: var(--ink-2); }
+  #streamrows .kv, #drainrows .kv { font-size: 12.5px; margin-top: 0; padding: 2px 0; gap: 10px; }
+  /* the status is the reading and stays on one line; a long store name ellipsizes instead */
+  #streamrows .kv span:last-child, #drainrows .kv span:last-child {
+    color: var(--ink-2); white-space: nowrap; }
+  #streamrows .kv span:first-child, #drainrows .kv span:first-child {
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #streamrows .kv span.hit, #drainrows .kv span.hit { color: var(--good); }
   .quietbar div { background: var(--aqua); }       /* draining, distinct from lag blue */
-  .quietbar div.done { background: var(--good); }   /* quiet ≥ 2 min: drained */
+  .quietbar div.done { background: var(--good); }   /* quiet ≥ 30s: drained */
   /* not-ready cue: the unfilled track is faintly red until drained, so red recedes as it fills */
   .quietbar.pending { background: color-mix(in srgb, var(--bad) 18%, var(--grid)); }
 
@@ -207,7 +215,7 @@
         <div id="streamrows"></div>
       </article>
       <article class="card" id="draincard">
-        <h2>drain readiness</h2>
+        <h2>drain readiness<span class="help" data-help="drain">?</span></h2>
         <div id="drainrows"></div>
       </article>
       <article class="card" id="movescard">
@@ -334,7 +342,7 @@ function renderSnapshot(units) {
 
 const LAG_FULL = 1 << 20;  // bar full-scale: 1 MB of WAL behind
 const KEYS_FULL = 20;      // blob bar full-scale: pending keys
-const QUIET_FULL = 120000; // quiet-bar full-scale: 2 min silent ⇒ org drained, cut-over-safe
+const QUIET_FULL = 30000;  // quiet-bar full-scale: 30s silent ⇒ org drained, cut-over-safe
 
 function streamRow(u) {
   if (u.status === "evicted") return { text: "source copy deleted ✓", frac: 0, cls: "hit" };
@@ -361,7 +369,7 @@ function streamRow(u) {
 // drain-readiness for a streaming postgres unit -- the doc's "org quiet clock", and the one bar
 // a stream earns. while it's still catching up (lag > 0) readiness is 0; once caught up (lag 0)
 // it fills with quiet time -- seconds since the org last had a change applied -- reaching
-// "drained" at 2 min (upstream empty AND everything ours applied). lag itself is text, not a bar:
+// "drained" at 30s (upstream empty AND everything ours applied). lag itself is text, not a bar:
 // it's a distance that goes up when worse, not progress toward a goal
 function quietClock(u) {
   if (u.status !== "streaming" || blobStores.has(u.unit)) return null;
@@ -370,12 +378,14 @@ function quietClock(u) {
   if (lag > 0) return { text: "catching up…", frac: 0, done: false };
   // no writes to this store's tables for the org -- normal (many orgs don't use every feature),
   // so it's neither pending-red nor drained-green: nothing to drain, stays neutral grey
-  if (!u.last_commit_at) return { text: "no changes seen", frac: 0, done: false, neutral: true };
+  if (!u.last_commit_at) return { text: "never written to", frac: 0, done: false, neutral: true };
   const ms = Date.now() - new Date(u.last_commit_at);
   const s = Math.floor(ms / 1000);
   const label = s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(Math.floor(s % 60)).padStart(2, "0")}s`;
   const done = ms >= QUIET_FULL;
-  return { text: `quiet ${label} / 2m${done ? " ✓ drained" : ""}`, frac: ms / QUIET_FULL, done };
+  // the threshold is only worth showing while it's still a target
+  return { text: done ? `no writes for ${label} ✓` : `no writes for ${label} / 30s`,
+           frac: ms / QUIET_FULL, done };
 }
 
 // stream card: a scannable text-only status list -- applied · lag for postgres, keys for blobs.
@@ -388,7 +398,7 @@ function renderStream(units) {
 }
 
 // drain card: one row + readiness bar per streaming postgres unit (blobs don't drain WAL).
-// empty while catching up, filling teal→green as it goes quiet toward the 2-minute drained mark
+// empty while catching up, filling teal→green as it goes quiet toward the 30-second drained mark
 function renderDrain(units) {
   const rows = units.map(u => {
     const q = quietClock(u);
@@ -722,6 +732,24 @@ function spineTip(name) {
     : `<b>${name}</b> — the root: the move is every row reachable from one ${name}`;
 }
 
+// card explainers, same #tip keyed by data-help. drain readiness earns one: its bar measures
+// silence, not progress, so it has to say what the silence is evidence of
+const HELP = {
+  drain: `<b>drain readiness</b> — the cut-over question: has writing to this store stopped?`
+    + `<br>Two conditions, in order. <b>Caught up</b>: the mover has applied everything Postgres`
+    + ` has handed it (lag 0). Necessary, not sufficient — upstream can still be producing.`
+    + ` <b>Quiet</b>: nothing new for <b>30 seconds</b>. Silence is the only evidence we have that`
+    + ` request handlers, ingest buffers and delayed tasks have all stopped landing rows; any`
+    + ` write restarts the clock.`
+    + `<br>The clock reads the source commit time of the last transaction this store's slot`
+    + ` delivered, so a write to these tables by another org resets it too — the gate errs long,`
+    + ` never short.`
+    + `<br>rows: <b>catching up…</b> lag &gt; 0 · <b>never written to</b> the org has no rows here,`
+    + ` nothing to drain (grey) · <b>no writes for Xs</b> counting up · <b>✓</b> drained, ready to`
+    + ` cut over.`
+    + `<br>Demo caveat: cut-over doesn't enforce this yet — shown, not gated.`,
+};
+
 const tip = $("tip");
 
 function highlightEdges(hoveredId) {
@@ -733,11 +761,13 @@ function highlightEdges(hoveredId) {
 }
 
 document.addEventListener("mousemove", e => {
-  const el = topo ? e.target.closest?.(".snode, .mini") : null;
+  // help badges aren't topology: they work before any config has loaded
+  const help = e.target.closest?.(".help");
+  const el = !help && topo ? e.target.closest?.(".snode, .mini") : null;
   highlightEdges(el?.id ?? null);
-  if (!el) { tip.style.display = "none"; return; }
-  const html = el.id.startsWith("spine-")
-    ? spineTip(el.id.slice(6))
+  if (!help && !el) { tip.style.display = "none"; return; }
+  const html = help ? HELP[help.dataset.help]
+    : el.id.startsWith("spine-") ? spineTip(el.id.slice(6))
     : storeTip(topo.stores.find(s => `node-${s.name}` === el.id));
   if (!html) { tip.style.display = "none"; return; }
   tip.innerHTML = html;

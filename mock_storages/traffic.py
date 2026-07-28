@@ -130,20 +130,28 @@ def write_row(
     table: str,
     org: int,
     i: int,
-) -> str:
+) -> str | None:
     """Insert one org-scoped row, built exactly as the seed builds its child rows: FK columns
     point at the org's anchor (id = org), blob columns get freshly written bytes, every other NOT
     NULL column gets a synthesized value. The id column build_row supplies is dropped so the
-    sequence (moved past the seed by align_sequences) assigns a fresh, non-colliding one."""
+    sequence (moved past the seed by align_sequences) assigns a fresh, non-colliding one. Returns
+    None when the row collides: a synthesized value can wrap onto one this org already holds (a
+    smallint in a composite unique constraint has only 32768 values), and a skipped write costs
+    the stream nothing."""
     conn = conns[graph.store_of[table]]
     columns, values = build_row(
         table, refs_of(graph, table), graph.root, org, i, schemas[id(conn)], blobs, store_config
     )
     columns, values = columns[1:], values[1:]  # drop id; let the sequence assign it
     collist = ", ".join(f'"{c}"' for c in columns)
-    row = conn.execute(
-        trust_sql(f'INSERT INTO "{table}" ({collist}) VALUES ({", ".join(values)}) RETURNING id')
-    ).fetchone()
+    try:
+        row = conn.execute(
+            trust_sql(
+                f'INSERT INTO "{table}" ({collist}) VALUES ({", ".join(values)}) RETURNING id'
+            )
+        ).fetchone()
+    except psycopg.errors.UniqueViolation:
+        return None
     assert row is not None
     return f"+{table} {row[0]}"
 
@@ -183,7 +191,8 @@ def main() -> None:
         change = write_row(
             graph, conns, blobs, store_config, schemas, random.choice(tables), org, 100_000 + n
         )
-        print(f"  {datetime.now():%H:%M:%S} org {org}  {change}")
+        if change:
+            print(f"  {datetime.now():%H:%M:%S} org {org}  {change}")
         time.sleep(random.uniform(0.5, 1.5) / args.rate)
 
 
