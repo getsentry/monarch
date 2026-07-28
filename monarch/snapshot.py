@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
 
@@ -186,6 +187,7 @@ def run_snapshot(
     root_id: int,
     blob_members: dict[str, BlobMembership],
     static_keys: dict[str, list[int]] | None = None,
+    report_progress: Callable[[str, int], None] | None = None,
 ) -> tuple[Membership, dict[str, int]]:
     """Run the snapshot across the passed stores: parents-first scoped queries collecting
     in-scope keys per table -- the keys dict is shared, so a table's predicate can consume
@@ -198,6 +200,11 @@ def run_snapshot(
     spans every store (the CLI's one-shot snapshot), so every parent is present to read
     directly. Either way the copy is only the org's scoped rows -- static_keys sets how many
     stores a call spans, never what's in scope.
+
+    report_progress(store, rows so far) fires after each table lands, so a copy that runs for
+    hours is legible while it runs rather than only in the total returned at the end. The
+    callback must write through a connection of the caller's own -- writing through one of the
+    pinned transactions here would surface nothing until commit, which is after the copy.
 
     Each store is read in one REPEATABLE READ transaction pinned to its own slot's
     exported snapshot: consistent per store. The stores' consistent points differ
@@ -257,10 +264,15 @@ def run_snapshot(
             )
 
         copied_by_table: dict[str, int] = {}
+        done_by_store = {s.store: 0 for s in sources}  # running totals for report_progress
         for table, scoped_by, pred in scoped:
             blobs = record_scoped_keys(source_for[table], table, pred, graph, blob_members)
             copied = copy_table(source_for[table], sink_for[table], table, pred)
             copied_by_table[table] = copied
+            if report_progress is not None:
+                store = graph.store_of[table]
+                done_by_store[store] += copied
+                report_progress(store, done_by_store[store])
             extra = f" + {blobs} key(s)" if table in graph.blobs else ""
             print(f"  {table:<16} via {scoped_by:<18} {copied} row(s){extra} -> sink")
 

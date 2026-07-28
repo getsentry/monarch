@@ -33,7 +33,17 @@ def run(*args: str) -> str:
 
 def sentry_ref() -> str:
     return run(
-        "docker", "compose", "exec", "-T", "sink", "psql", "-U", "monarch", "-d", TEMPLATE, "-tAc",
+        "docker",
+        "compose",
+        "exec",
+        "-T",
+        "sink",
+        "psql",
+        "-U",
+        "monarch",
+        "-d",
+        TEMPLATE,
+        "-tAc",
         "SELECT shobj_description(oid, 'pg_database') FROM pg_database"
         f" WHERE datname = '{TEMPLATE}'",
     ).strip()
@@ -42,8 +52,20 @@ def sentry_ref() -> str:
 def dump() -> str:
     args = [a for t in TABLES for a in ("-t", t)]
     return run(
-        "docker", "compose", "exec", "-T", "sink", "pg_dump", "-U", "monarch", "-d", TEMPLATE,
-        "--schema-only", "--no-owner", "--no-acl", *args,
+        "docker",
+        "compose",
+        "exec",
+        "-T",
+        "sink",
+        "pg_dump",
+        "-U",
+        "monarch",
+        "-d",
+        TEMPLATE,
+        "--schema-only",
+        "--no-owner",
+        "--no-acl",
+        *args,
     )
 
 

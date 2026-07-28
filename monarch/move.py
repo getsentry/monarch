@@ -238,6 +238,14 @@ class MoveUnit:
             (rows, self.move.id, self.unit),
         )
 
+    def record_copy_progress(self, rows: int) -> None:
+        """Rows copied so far, overwritten after each table -- the numerator the two write-once
+        columns above are the denominator for. Advisory, like the heartbeat gauges."""
+        self.move.conn.execute(
+            "UPDATE move_unit SET copy_rows_done = %s WHERE move_id = %s AND unit = %s",
+            (rows, self.move.id, self.unit),
+        )
+
     def heartbeat(
         self,
         applied: str | None = None,

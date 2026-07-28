@@ -22,7 +22,7 @@ from .blobs import Bucket, blob_copiers
 from .cell_eviction import run_evict
 from .config import Cell, Graph, connect
 from .membership import BlobMembership
-from .snapshot import Source, derive_membership, read_frozen_ids, run_snapshot
+from .snapshot import Source, derive_membership, estimate_rows, read_frozen_ids, run_snapshot
 from .stream import StreamSource, run_streams
 
 POLL_SECONDS = 1.0
@@ -66,6 +66,11 @@ def snapshot(
         }
         frozen_ids = read_frozen_ids(graph, source, src_conns, org_id)
         decode = src_conns[src_db.decode_dsn]
+        # planner-only, before anything is created on the source: the copy bar's denominator, and
+        # the one place a store monarch can't scope is refused (estimate_rows -> UnscopableTable)
+        unit.record_copy_estimate(
+            estimate_rows(decode, graph, graph.store_tables(store), org_id, frozen_ids)
+        )
 
         ins, mut = slot.build_row_filters(
             graph, graph.store_tables(store), org_id, frozen_ids, decode
@@ -91,6 +96,9 @@ def snapshot(
             org_id,
             blob_members,
             static_keys=static_keys,
+            # the worker's own autocommit ledger connection, never the pinned snapshot
+            # transaction: a write there would land only at commit, once the copy is already over
+            report_progress=lambda _store, rows: unit.record_copy_progress(rows),
         )
         rows = sum(copied.values())
 

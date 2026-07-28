@@ -132,6 +132,7 @@ def cmd_snapshot(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: 
                         if not slot.publication_exists(conns[db.decode_dsn], name):
                             sys.exit(f"publication {name} missing on {db.dbname}")
             sources = []
+            units: dict[str, move.MoveUnit] = {}  # by store, for the copy progress callback
             # slot creation on a standby blocks until a running-xacts record arrives from
             # the primary over physical replication -- an idle primary may not emit one for
             # minutes, so drip them ourselves until every slot has its consistent point.
@@ -143,7 +144,7 @@ def cmd_snapshot(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: 
                         name = slot.slot_name(org_id, store)
                         lsn, snapshot = stack.enter_context(slot.create_slot(db.decode_dsn, name))
                         print(f"slot {name} created at LSN {lsn} (snapshot {snapshot})")
-                        unit = move.MoveUnit(m, store)
+                        unit = units[store] = move.MoveUnit(m, store)
                         unit.transition(move.UnitStatus.COPYING, note=f"slot {name} at {lsn}")
                         # each store gets its own pinned connection -- colocated stores read
                         # their shared database on separate exported snapshots
@@ -158,7 +159,17 @@ def cmd_snapshot(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: 
             for name in blob_names:
                 move.MoveUnit(m, name).transition(move.UnitStatus.COPYING, note="recording keys")
             print()
-            _, copied = run_snapshot(sources, sinks, sink, graph, org_id, blob_members)
+            # book is autocommit and holds none of the snapshot's pinned transactions, so each
+            # per-table write is visible to the dashboard as the copy runs
+            _, copied = run_snapshot(
+                sources,
+                sinks,
+                sink,
+                graph,
+                org_id,
+                blob_members,
+                report_progress=lambda store, rows: units[store].record_copy_progress(rows),
+            )
             for db in source.databases:
                 for store in db.stores:
                     rows = sum(copied.get(t, 0) for t in graph.store_tables(store))

@@ -250,12 +250,15 @@ class Handler(BaseHTTPRequestHandler):
         except KeyError, TypeError, ValueError:
             self._respond(400, "application/json", _to_json({"error": "expected {move}"}))
             return
-        # every unit must have streamed (heartbeat_at set -- only run_streams writes it, and it
-        # survives a stop) and be stopped (back at copied). The caught-up check (applied >= head)
-        # is the deferred drain gate.
+        # every unit must have streamed and be stopped (back at copied). "streamed" reads off
+        # `applied` -- the sink position the mover reported, written only by run_streams and kept
+        # across a stop: you can't flip to a sink whose position was never observed. Deliberately
+        # not heartbeat_at, which is liveness (ledger.sql: never read by transitions) and would
+        # break the moment anything else beat. The deferred drain gate refines this same column
+        # to applied >= head.
         row = self.conn.execute(
             "SELECT count(*) FROM move_unit"
-            " WHERE move_id = %s AND (status != 'copied' OR heartbeat_at IS NULL)",
+            " WHERE move_id = %s AND (status != 'copied' OR applied IS NULL)",
             (move_id,),
         ).fetchone()
         assert row is not None

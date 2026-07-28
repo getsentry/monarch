@@ -65,7 +65,11 @@ mock-schema: databases
 	-uv run python mock_storages/generate_schema.py | $(PSQL) -d sink
 	uv run monarch init-ledger
 
-# Seed the source cell's databases (and the mock filestore) with example data.
+# Seed the source cell's databases (and the mock filestore) with example data. Org 1 is seeded
+# large (BIG_ORG_ROWS rows per eligible table, default 50000) so `make run` + a move of org 1 has
+# a copy long enough to watch progress on; every other org stays at 8-40 rows per table, so
+# `ORG=2 make snapshot` is still instant. Lower it -- `make data BIG_ORG_ROWS=2000` -- if the
+# seed itself is taking longer than you want.
 # ANALYZE after seeding: monarch's copy_rows_estimate comes from EXPLAIN, which is only as
 # good as the tables' statistics -- freshly seeded tables have none and the planner guesses
 # wildly. Runs on the primary (a standby is read-only) and replicates to the standby, where

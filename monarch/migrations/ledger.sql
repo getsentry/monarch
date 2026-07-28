@@ -37,6 +37,9 @@ CREATE TABLE IF NOT EXISTS move_unit (
     -- COALESCE(total, estimate); display only, nothing gates on either
     copy_rows_estimate bigint,
     copy_rows_total    bigint,
+    -- the numerator, overwritten after each table copied (not write-once like the two above):
+    -- without it the denominator has nothing to divide and the copy phase reads as one long stall
+    copy_rows_done     bigint,
     -- advisory gauges, overwritten each mover heartbeat; never read by transitions.
     -- stale heartbeat_at = the mover is dead or wedged
     applied         text,         -- position applied to the sink: pg = LSN, clickhouse = commit-log offset

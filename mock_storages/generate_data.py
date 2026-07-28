@@ -17,7 +17,10 @@ to the same anchor) caps the table to one row per org. The whole seed for a data
 in one transaction so its DEFERRABLE foreign keys resolve at commit, once every anchor exists
 -- insert order doesn't have to satisfy them.
 
-Row counts come from ROWS (random for tables not listed). Each table's row 0 is the
+Row counts come from ROWS (random for tables not listed), except org BIG_ORG, which gets
+BIG_ORG_ROWS in every table where the primary key is the only thing that must stay unique --
+so moving it is slow enough to watch the copy, while moving any other org is still instant.
+Each table's row 0 is the
 anchor: id = the org's id, and every literal FK points at it -- the per-database
 invocations, the demo, and traffic all assume it. Non-anchor ids are i * 10000 + org_id --
 globally unique across orgs (org ids stay under 10000), so a long-running traffic writer's
@@ -39,7 +42,15 @@ from dependencies import CONFIG, FLEET, load_from_config, topological_sort
 from monarch.utils import trust_sql
 
 ORG_COUNT = 20
+# one org is seeded large so that moving it takes long enough to watch the copy progress, while
+# every other org stays small and moves in a blink -- pick which demo you want with `ORG=` at
+# move time rather than reseeding. Tune with BIG_ORG_ROWS=... on `make data`. Taken by tables
+# whose primary key is their sole unique constraint (find_extra_unique_tables) and which don't
+# key a blob per row.
+BIG_ORG = 1
+BIG_ORG_ROWS = int(os.environ.get("BIG_ORG_ROWS", "50000"))
 ROWS = {"group": 1000}  # tables not listed roll 8-40
+BATCH = 1000  # rows per INSERT: at BIG_ORG_ROWS, one statement per row is what makes psql crawl
 REPO_ROOT = os.path.dirname(os.path.abspath(CONFIG))
 
 
@@ -234,9 +245,31 @@ def probe(
     return single
 
 
-def row_count(table: str, root: str, single: bool) -> int:
+def find_extra_unique_tables(conn: psycopg.Connection) -> set[str]:
+    """Tables with a unique or exclusion constraint beyond the primary key -- the ones BIG_ORG_ROWS
+    must leave alone. Every FK in a seeded row points at the same anchor, so such a constraint
+    leans on a synthesized column, and synth_value wraps bounded ints into their type's range:
+    stepping row_id by 10000 through smallint repeats every 2048 rows. probe() tests two rows and
+    cannot see it, which is why this is read from the catalog instead."""
+    rows = conn.execute(
+        "SELECT c.relname FROM pg_index i"
+        " JOIN pg_class c ON c.oid = i.indrelid"
+        " JOIN pg_namespace n ON n.oid = c.relnamespace"
+        " WHERE n.nspname = 'public' AND i.indisunique AND NOT i.indisprimary"
+        " UNION"
+        " SELECT c.relname FROM pg_constraint x"
+        " JOIN pg_class c ON c.oid = x.conrelid"
+        " JOIN pg_namespace n ON n.oid = c.relnamespace"
+        " WHERE n.nspname = 'public' AND x.contype = 'x'"
+    ).fetchall()
+    return {r[0] for r in rows}
+
+
+def row_count(table: str, root: str, single: bool, org_id: int, inflatable: bool) -> int:
     if table == root or single:
         return 1  # the root carries the unique name; single-row tables collide past the anchor
+    if org_id == BIG_ORG and inflatable:
+        return BIG_ORG_ROWS
     if table in ROWS:
         return ROWS[table]
     return random.randint(8, 40)
@@ -254,6 +287,7 @@ def main() -> None:
     with connect_source(stores) as conn:
         schema = Schema(conn)
         single = {t: probe(conn, t, tables[t], root, schema, blobs, store_config) for t in seeded}
+        extra_unique = find_extra_unique_tables(conn)
 
     print("BEGIN;")
     print("SET CONSTRAINTS ALL DEFERRED;")
@@ -261,14 +295,44 @@ def main() -> None:
     # child can't look up its parent's id (the parent table isn't there). Every FK points at the
     # parent's anchor row (id = org id). Names are the id-suffixed sentry-N -- unique by
     # construction (the schema's UNIQUE backstops it).
+    # the big org's rows only go where nothing but the primary key has to stay unique, and where
+    # the row count doesn't become a file count: a content-addressed store dedups to build_row's
+    # four contents per table however many rows there are, but an exclusive (delete-eviction) one
+    # keys per row, so BIG_ORG_ROWS there would drop that many files on disk
+    inflatable = {
+        t: t not in extra_unique
+        and not any(
+            store_config[ref["blob"]].get("eviction") == "delete"
+            for ref in tables[t].values()
+            if "blob" in ref
+        )
+        for t in seeded
+    }
+    # stderr: stdout is the SQL stream. says upfront how much volume the big org actually gets,
+    # since the eligible set depends on the loaded schema's constraints
+    print(
+        f"big org {BIG_ORG}: {sum(inflatable.values())}/{len(seeded)} tables at "
+        f"{BIG_ORG_ROWS} rows each",
+        file=sys.stderr,
+    )
     for org_id in range(1, ORG_COUNT + 1):
         for table in seeded:
-            for i in range(row_count(table, root, single[table])):
+            n = row_count(table, root, single[table], org_id, inflatable[table])
+            # batched multi-row VALUES; a table's column list is schema-derived so the first row's
+            # is every row's, and a mismatch would fail loudly in psql rather than seed badly
+            cols, batch = None, []
+            for i in range(n):
                 columns, values = build_row(
                     table, tables[table], root, org_id, i, schema, blobs, store_config
                 )
-                cols = ", ".join(f'"{c}"' for c in columns)
-                print(f'INSERT INTO "{table}" ({cols}) VALUES ({", ".join(values)});')
+                if cols is None:
+                    cols = ", ".join(f'"{c}"' for c in columns)
+                batch.append(f"({', '.join(values)})")
+                if len(batch) == BATCH:
+                    print(f'INSERT INTO "{table}" ({cols}) VALUES {", ".join(batch)};')
+                    batch = []
+            if batch:
+                print(f'INSERT INTO "{table}" ({cols}) VALUES {", ".join(batch)};')
     print("COMMIT;")
 
 

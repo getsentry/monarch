@@ -141,9 +141,7 @@ def build(conn: Connection, indexed: bool, id_base: int = 1) -> None:
     for statement in tables + (indexes if indexed else []):
         conn.execute(sql.SQL(statement))  # pyright: ignore[reportArgumentType]
     for table in (NARROW.table, WIDE.table):
-        conn.execute(
-            "SELECT setval(pg_get_serial_sequence(%s, 'id'), %s, false)", (table, id_base)
-        )
+        conn.execute("SELECT setval(pg_get_serial_sequence(%s, 'id'), %s, false)", (table, id_base))
     conn.commit()
 
 
@@ -275,15 +273,19 @@ def main() -> None:
     print(f"\nmover pipe ceiling      {bare:>12,.0f} rows/s")
     print(f"index cost (narrow)     {bare / narrow:>12.2f}x")
     print(f"narrow:wide ratio       {narrow / wide:>12.2f}x")
-    print("\nprod's idx:cache for debugidartifactbundle is ~17:1 (4,478 GB / ~256 GB RAM) --"
-          " raise `preseed` or lower mem_limit in bench/compose.yaml to close the gap.")
+    print(
+        "\nprod's idx:cache for debugidartifactbundle is ~17:1 (4,478 GB / ~256 GB RAM) --"
+        " raise `preseed` or lower mem_limit in bench/compose.yaml to close the gap."
+    )
     wall = time.monotonic() - total
     print(f"\n{'where the time went':<26}{'seconds':>9}{'share':>8}")
     print("-" * 43)
     for name, spent in sorted(SPENT.items(), key=lambda kv: -kv[1]):
         print(f"{name:<26}{spent:>9.0f}{spent / wall:>8.0%}")
-    print(f"{'unaccounted':<26}{wall - sum(SPENT.values()):>9.0f}"
-          f"{(wall - sum(SPENT.values())) / wall:>8.0%}")
+    print(
+        f"{'unaccounted':<26}{wall - sum(SPENT.values()):>9.0f}"
+        f"{(wall - sum(SPENT.values())) / wall:>8.0%}"
+    )
     print("-" * 43)
     print(f"{'total':<26}{wall:>9.0f}{1:>8.0%}")
 

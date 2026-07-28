@@ -156,6 +156,9 @@
                   font-variant-numeric: tabular-nums; }
   #snaprows .kv span:last-child { color: var(--ink-2); text-align: right; }
   #snaprows .kv span.hit { color: var(--good); }
+  /* the row carries the same detail the diagram node does, so it hovers like one */
+  .unitrow { cursor: help; }
+  .unitrow:hover { background: var(--grid); }
   .lagbar { height: 4px; border-radius: 2px; background: var(--grid); overflow: hidden;
             margin: 1px 0 7px; }
   .lagbar div { height: 100%; width: 0%; background: var(--blue); border-radius: 2px;
@@ -324,8 +327,13 @@ function snapLine(u) {
   const noun = blobStores.has(u.unit) ? "keys" : "rows";
   if (u.status === "pending") return "waiting";
   if (u.status === "copying")
+    // the mover writes copy_rows_done per table, so this counts up instead of reading as a stall.
+    // deliberately no fraction: the count is exact, the estimate is the planner's, and dividing
+    // one by the other would dress a guess up as a percentage. the estimate only sets scale, and
+    // only until the first table lands
     return "copying…"
-      + (u.copy_rows_estimate != null ? ` ~${fmt(u.copy_rows_estimate)} ${noun} expected` : "")
+      + (u.copy_rows_done != null ? ` ${fmt(u.copy_rows_done)} ${noun}`
+         : u.copy_rows_estimate != null ? ` ~${fmt(u.copy_rows_estimate)} ${noun} expected` : "")
       + (t.copying ? ` · started ${clock(t.copying)}` : "");
   let s = u.copy_rows_total != null ? `✓ ${fmt(u.copy_rows_total)} ${noun}` : "✓ copied";
   if (t.copying && t.copied) s += ` · ${fmtDur(new Date(t.copied) - new Date(t.copying))}`;
@@ -335,7 +343,8 @@ function snapLine(u) {
 function renderSnapshot(units) {
   $("snaprows").innerHTML = units.map(u => {
     const done = !["pending", "copying"].includes(u.status);
-    return `<div class="kv"><span>${u.unit}</span>`
+    // data-unit makes the row a hover target for the same #tip the diagram node uses
+    return `<div class="kv unitrow" data-unit="${u.unit}"><span>${u.unit}</span>`
       + `<span class="${done ? "hit" : ""}">${snapLine(u)}</span></div>`;
   }).join("");
 }
@@ -589,7 +598,9 @@ const ACTIONS = [
       return true;
     },
     arm: m => !m || m.phase !== "active" ? "needs an active move"
-      : !lastUnits.every(u => u.heartbeat_at != null) ? "start the stream first — every unit must have streamed"
+      // same predicate the server enforces (dashboard.py /cutover): `applied` is the reported
+      // sink position, not liveness -- the button must arm on exactly what the POST will accept
+      : !lastUnits.every(u => u.applied != null) ? "start the stream first — every unit must have streamed"
       : !lastUnits.every(u => u.status === "copied") ? "stop the streams first — every unit must be back at copied" : null },
   { label: "finalize",
     run: async note => {
@@ -684,7 +695,7 @@ $("actionbtns").addEventListener("click", async e => {
 // per-unit liveness is heartbeat freshness, read in the popover
 let lastMove = null, lastUnits = [], streaming = false;
 
-function storeTip(s) {
+function storeTip(s, showTopology = true) {
   const cell = lastMove?.source_cell ?? Object.keys(topo.placement)[0];
   const placement = topo.placement[cell] ?? {};
   if (s.kind === "blob") {
@@ -699,18 +710,29 @@ function storeTip(s) {
   const mates = topo.stores.filter(o => o.kind === "postgres" && o.name !== s.name
     && placement[o.name] === db).map(o => o.name);
   const u = lastUnits.find(x => x.unit === s.name);
-  let lines = `<b>${s.name}</b> · postgres<br>hosted in database <b>${db ?? "?"}</b>` +
-    (mates.length
-      ? ` — shares its database with <b>${mates.join(", ")}</b> (separate slot and mover)`
-      : "");
+  // placement and the table list are topology, so they ride the diagram hover only -- on a
+  // progress row they're noise. the diagram draws no db grouping, so this tip is its only home
+  let lines = `<b>${s.name}</b> · postgres` + (showTopology
+    ? ` · db <b>${db ?? "?"}</b>`
+      + (mates.length ? ` (with <b>${mates.join(", ")}</b> — own slot and mover)` : "")
+    : "");
   if (u) {
     lines += `<br>unit status: <b>${u.status.replace("_", " ")}</b>`;
-    if (u.copy_rows_total != null) lines += ` · ${fmt(u.copy_rows_total)} rows copied` +
-      (u.copy_rows_estimate != null ? ` (est ~${fmt(u.copy_rows_estimate)})` : "");
-    else if (u.copy_rows_estimate != null) lines += ` · ~${fmt(u.copy_rows_estimate)} rows expected`;
-    if (u.heartbeat_at) lines += `<br>mover: <b>${Date.now() - new Date(u.heartbeat_at) < 15000 ? "alive" : "not running"}</b>` +
+    // one number per line, and the estimate is its own line rather than a parenthetical: the two
+    // are measured differently -- one counted by COPY, one guessed by the planner -- and nothing
+    // here divides them. the label says which is which
+    if (u.copy_rows_total != null) lines += `<br>rows copied: <b>${fmt(u.copy_rows_total)}</b>`;
+    else if (u.copy_rows_done != null) lines += `<br>rows copied so far: <b>${fmt(u.copy_rows_done)}</b>`;
+    if (u.copy_rows_estimate != null) lines += `<br>planner estimate: ~${fmt(u.copy_rows_estimate)}`;
+    // only run_streams beats, so a copying unit has nothing to report -- saying "no heartbeat"
+    // there reads as a dead mover when the mover is mid-copy. silence is only alarming while
+    // streaming, which is the one status that promises a beat
+    // "not streaming", not "not running": only run_streams beats, so a stale beat means the
+    // stream ended -- the worker itself is still alive and polling. stale WHILE streaming is the
+    // case this is here to catch, and there it means the mover died
+    if (u.heartbeat_at) lines += `<br>mover: <b>${Date.now() - new Date(u.heartbeat_at) < 15000 ? "alive" : "not streaming"}</b>` +
       ` — last heartbeat ${fmtDur(Date.now() - new Date(u.heartbeat_at))} ago`;
-    else if (u.status !== "pending") lines += `<br>mover: no heartbeat yet`;
+    else if (u.status === "streaming") lines += `<br>mover: <b>no heartbeat</b> — streaming but silent`;
     if (u.status === "streaming" && lagBytes(u) != null)
       lines += `<br>stream: lag <b>${fmtBytes(lagBytes(u))}</b>` +
         (u.applied_changes != null ? ` · <b>${fmt(+u.applied_changes)}</b> changes applied` : "") +
@@ -719,7 +741,7 @@ function storeTip(s) {
           ? ` (committed ${fmtDur(Date.now() - new Date(u.last_commit_at))} ago)` : "") +
         ` · head ${u.head}`;
   }
-  return lines + `<br>tables: ${s.tables.join(", ")}`;
+  return lines + (showTopology ? `<br>tables: ${s.tables.join(", ")}` : "");
 }
 
 function spineTip(name) {
@@ -763,10 +785,16 @@ function highlightEdges(hoveredId) {
 document.addEventListener("mousemove", e => {
   // help badges aren't topology: they work before any config has loaded
   const help = e.target.closest?.(".help");
-  const el = !help && topo ? e.target.closest?.(".snode, .mini") : null;
-  highlightEdges(el?.id ?? null);
+  const el = !help && topo ? e.target.closest?.(".snode, .mini, .unitrow") : null;
+  // a card row stands in for its diagram node: same tip, and it lights the node's edges too.
+  // an older move can name a store this manifest dropped, so a miss means no tip, not a throw
+  const unit = el?.dataset.unit;
+  const unitStore = unit ? topo.stores.find(s => s.name === unit) : null;
+  highlightEdges(unitStore ? `node-${unit}` : el?.id || null);
   if (!help && !el) { tip.style.display = "none"; return; }
   const html = help ? HELP[help.dataset.help]
+    : unitStore ? storeTip(unitStore, false)  // card row: progress, not topology
+    : unit ? null
     : el.id.startsWith("spine-") ? spineTip(el.id.slice(6))
     : storeTip(topo.stores.find(s => `node-${s.name}` === el.id));
   if (!html) { tip.style.display = "none"; return; }
