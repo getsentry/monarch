@@ -25,9 +25,10 @@
   body { margin: 0; background: var(--page); color: var(--ink);
          font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
   .wrap { max-width: 1230px; margin: 0 auto; padding: 18px 24px 40px; }
-  .layout { display: grid; grid-template-columns: 1fr 300px; gap: 16px; align-items: start; }
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px;
+            align-items: start; }
   .main { min-width: 0; }
-  .side { display: grid; gap: 16px; }
+  .side { display: grid; gap: 16px; min-width: 0; }
   @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
 
   header { display: flex; justify-content: space-between; align-items: baseline;
@@ -165,6 +166,8 @@
   #storepop { font-size: 12px; line-height: 1.5; color: var(--ink-2); }
   #storepop b { color: var(--ink); }
   #storepop .x { float: right; cursor: pointer; color: var(--muted); margin-left: 8px; }
+  #storepop ul { margin: 4px 0 0; padding-left: 15px; }
+  #storepop li { margin: 1px 0; }
 
   #units { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
            gap: 12px; margin-bottom: 16px; }
@@ -175,19 +178,22 @@
   .unit .st::before { content: "●"; margin-right: 5px; font-size: 8px; vertical-align: 1px; }
   .kv { display: flex; justify-content: space-between; font-size: 13px;
         color: var(--ink-2); margin-top: 6px; }
-  .kv span:last-child { color: var(--ink); font-variant-numeric: tabular-nums; }
+  .kv span:first-child { flex: none; }
+  .kv span:last-child { color: var(--ink); font-variant-numeric: tabular-nums;
+                        min-width: 0; text-align: right;
+                        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #snaprows .kv { font-size: 12.5px; margin-top: 0; padding: 2px 0;
                   font-variant-numeric: tabular-nums; }
   #snaprows .kv span:last-child { color: var(--ink-2); text-align: right; }
   #snaprows .kv span.hit { color: var(--good); }
   /* the row carries the same detail the diagram node does, so it hovers like one */
-  .unitrow { cursor: help; }
-  .unitrow:hover { background: var(--grid); }
   .lagbar { height: 4px; border-radius: 2px; background: var(--grid); overflow: hidden;
             margin: 1px 0 7px; }
   .lagbar div { height: 100%; width: 0%; background: var(--blue); border-radius: 2px;
                 transition: width 0.3s, background 0.3s; }
   #streamrows .kv, #drainrows .kv { font-size: 12.5px; margin-top: 0; padding: 2px 0; gap: 10px; }
+  .unitrow { cursor: help; }
+  .unitrow:hover { background: var(--grid); }
   /* the status is the reading and stays on one line; a long store name ellipsizes instead */
   #streamrows .kv span:last-child, #drainrows .kv span:last-child {
     color: var(--ink-2); white-space: nowrap; }
@@ -353,9 +359,7 @@ function snapLine(u) {
   if (u.status === "pending") return "waiting";
   if (u.status === "copying")
     // the mover writes copy_rows_done per table, so this counts up instead of reading as a stall.
-    // deliberately no fraction: the count is exact, the estimate is the planner's, and dividing
-    // one by the other would dress a guess up as a percentage. the estimate only sets scale, and
-    // only until the first table lands
+    // the estimate only sets scale, and only until the first table lands -- the hover holds both
     return "copying…"
       + (u.copy_rows_done != null ? ` ${fmt(u.copy_rows_done)} ${noun}`
          : u.copy_rows_estimate != null ? ` ~${fmt(u.copy_rows_estimate)} ${noun} expected` : "")
@@ -368,7 +372,7 @@ function snapLine(u) {
 function renderSnapshot(units) {
   $("snaprows").innerHTML = units.map(u => {
     const done = !["pending", "copying"].includes(u.status);
-    // data-unit makes the row a hover target for the same #tip the diagram node uses
+    // data-unit makes the row a hover target for its own tip -- the copy detail the row can't fit
     return `<div class="kv unitrow" data-unit="${u.unit}"><span>${u.unit}</span>`
       + `<span class="${done ? "hit" : ""}">${snapLine(u)}</span></div>`;
   }).join("");
@@ -382,10 +386,22 @@ function streamRow(u) {
   if (u.status === "evicted") return { text: "source copy deleted ✓", frac: 0, cls: "hit" };
   if (u.status === "evicting") return { text: "evicting source…", frac: 0, cls: "" };
   if (u.status === "slot_dropped") return { text: "pipe closed ✓", frac: 0, cls: "hit" };
-  if (u.status !== "streaming") return { text: "queued", frac: 0, cls: "" };
+  // copied means either snapshot-done or stream-stopped; a reported sink position tells them
+  // apart. keep the numbers a stopped unit earned -- whether it was caught up when it stopped is
+  // the cut-over question, and it stays true after the stream ends
+  if (u.status !== "streaming") {
+    if (u.applied == null) return { text: "queued", frac: 0, cls: "" };
+    if (blobStores.has(u.unit))
+      return { text: `${fmt(+u.applied)}/${fmt(+u.head)} keys · stopped`, frac: 0, cls: "" };
+    const stoppedAt = lagBytes(u);
+    if (stoppedAt === 0)
+      return { text: `${fmt(+u.applied_changes)} applied · caught up ✓`, frac: 0, cls: "hit" };
+    return { text: `${fmt(+u.applied_changes)} applied · stopped`
+      + (stoppedAt != null ? ` ${fmtBytes(stoppedAt)} behind` : ""), frac: 0, cls: "" };
+  }
   // blob units heartbeat key counts, not LSNs
   if (blobStores.has(u.unit)) {
-    if (!u.head) return { text: "worker running — no counts yet", frac: 0, cls: "" };
+    if (!u.head) return { text: "starting…", frac: 0, cls: "" };
     const pending = +u.head - +u.applied;
     return pending
       ? { text: `${fmt(+u.applied)}/${fmt(+u.head)} keys copied`, frac: pending / KEYS_FULL, cls: "" }
@@ -394,7 +410,7 @@ function streamRow(u) {
   const lag = lagBytes(u);
   // mover-fed count of change events applied; ticks up while streaming, flat = quiesced
   const applied = u.applied_changes != null ? `${fmt(+u.applied_changes)} applied · ` : "";
-  if (lag == null) return { text: `${applied}streaming — no positions yet`, frac: 0, cls: "" };
+  if (lag == null) return { text: "starting…", frac: 0, cls: "" };
   return lag
     ? { text: `${applied}${fmtBytes(lag)} behind`, frac: lag / LAG_FULL, cls: "" }
     : { text: `${applied}0 B behind ✓`, frac: 0, cls: "hit" };
@@ -783,11 +799,8 @@ function storeTip(s) {
       ? "eviction: <b>delete</b> — the org's objects are removed with their rows (no reclaimer exists)"
       : "eviction: <b>keep</b> — rows go first, the owning service's GC reclaims unreferenced bytes";
     if (s.migrate === false)
-      return `<b>${s.name}</b> · bucket<br>referenced by: <b>${refs}</b><br>` +
-        `<b>not moved</b> — the rows that reference these objects move, the bytes stay. Whether ` +
-        `they need to move is open: regional buckets would mean nothing to transfer, per-cell ` +
-        `buckets would mean a bulk server-side transfer out of band, gated at cut over. Neither ` +
-        `is a streaming mover, so this bucket is not a unit.<br>once that settles, ${ev}`;
+      return `<b>${s.name}</b> · bucket<br>referenced by: <b>${refs}</b><br>`
+        + `<b>not moved</b> — the referencing rows move, the bytes stay`;
     return `<b>${s.name}</b> · bucket<br>referenced by: <b>${refs}</b><br>${ev}<br>` +
       `no slot or stream: objects copy alongside their referencing rows`;
   }
@@ -795,11 +808,26 @@ function storeTip(s) {
   const lines = `<b>${s.name}</b> · postgres · db <b>${placement[s.name] ?? "?"}</b>`;
   // a store the move leaves out has no walk to draw: the reason it has none is the whole panel
   if (s.migrate === false)
-    return lines + `<br><b>out of the move — not currently safe to copy</b>. Org-scoped rows ` +
-      `point <i>at</i> these tables, so membership has to come in reverse. And their identity is ` +
-      `a content checksum shared across orgs, so the sink may already hold the same bytes under ` +
-      `a different id.`;
+    return lines + `<br><b>out of the move — not currently safe to copy</b>`
+      + `<ul><li>membership: org-scoped rows point <i>at</i> these tables, so it has to come in`
+      + ` reverse</li><li>identity: a content checksum shared across orgs, so the sink may already`
+      + ` hold the same bytes under a different id</li></ul>`;
   return lines + `<div class="tree">${s.scope_tree.map(treeNode).join("")}</div>`;
+}
+
+// the snapshot row stays terse, so its numbers ride here. one per line, and the estimate is its
+// own line rather than a parenthetical: one is counted by COPY, the other guessed by the planner,
+// and nothing here divides them
+function snapTip(u) {
+  if (!u) return null;
+  const noun = blobStores.has(u.unit) ? "keys" : "rows";
+  let lines = `<b>${u.unit}</b> · snapshot`;
+  if (u.copy_rows_total != null) lines += `<br>${noun} copied: <b>${fmt(u.copy_rows_total)}</b>`;
+  else if (u.copy_rows_done != null)
+    lines += `<br>${noun} copied so far: <b>${fmt(u.copy_rows_done)}</b>`;
+  if (u.copy_rows_estimate != null)
+    lines += `<br>planner estimate: ~${fmt(u.copy_rows_estimate)}`;
+  return lines;
 }
 
 function spineTip(name) {
@@ -843,17 +871,15 @@ function highlightEdges(hoveredId) {
 document.addEventListener("mousemove", e => {
   // help badges aren't topology: they work before any config has loaded
   const help = e.target.closest?.(".help");
-  const el = !help && topo ? e.target.closest?.(".snode, .mini, .unitrow") : null;
-  // a card row stands in for its diagram node: same tip, and it lights the node's edges too.
-  // an older move can name a store this manifest dropped, so a miss means no tip, not a throw
-  const unit = el?.dataset.unit;
-  const unitStore = unit ? topo.stores.find(s => s.name === unit) : null;
-  highlightEdges(unitStore ? `node-${unit}` : el?.id || null);
-  // an open scope tree owns the pointer: a tip chasing the cursor over it would cover the rows
-  if (openedStore || (!help && !el)) { tip.style.display = "none"; return; }
-  // only the anchor minis and the help badges are hovered for text now: a card row says its own
-  // progress, and a store node is clicked
+  const el = !help && topo ? e.target.closest?.(".snode, .mini") : null;
+  const row = !help ? e.target.closest?.(".unitrow") : null;
+  // only the graph moves the graph: a snapshot row lights nothing
+  highlightEdges(el?.id || null);
+  // an open store panel owns the pointer: a tip chasing the cursor over it would cover the rows
+  if (openedStore || (!help && !el && !row)) { tip.style.display = "none"; return; }
+  // a store node is clicked, not hovered, so it earns no tip here
   const html = help ? HELP[help.dataset.help]
+    : row ? snapTip(lastUnits.find(u => u.unit === row.dataset.unit))
     : el.id.startsWith("spine-") ? spineTip(el.id.slice(6))
     : null;
   if (!html) { tip.style.display = "none"; return; }

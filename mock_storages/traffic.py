@@ -53,15 +53,19 @@ def read_orgs(graph: Graph, conns: Conns) -> list[int]:
 
 
 def align_sequences(graph: Graph, conns: Conns) -> None:
-    """The seed inserts explicit ids without consuming the tables' sequences; point each sequence
-    at max(id) so this writer's DEFAULT ids start past the seed."""
+    """The seed inserts explicit ids without consuming the tables' sequences; point each sequence at
+    max(id) so this writer's DEFAULT ids start past the seed. Never backwards, though: max(id)
+    shrinks when a moved org is evicted from the source, and an id reissued to another org fails
+    that org's copy on the primary key -- the sink still holds the row that first used it."""
     for table, store in graph.store_of.items():
         if store not in conns:
             continue
+        seq = f"""pg_get_serial_sequence('"{table}"', 'id')"""
         conns[store].execute(
             trust_sql(
-                f"""SELECT setval(pg_get_serial_sequence('"{table}"', 'id'),
-                             (SELECT COALESCE(MAX(id), 1) FROM "{table}"))"""
+                f"""SELECT setval({seq}, GREATEST(
+                        (SELECT COALESCE(MAX(id), 1) FROM "{table}"),
+                        COALESCE(pg_sequence_last_value({seq}::regclass), 1)))"""
             )
         )
 
