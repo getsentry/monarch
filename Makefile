@@ -1,13 +1,13 @@
 COMPOSE := docker compose
-# per-instance psql helpers: sink = the pg14 sink cell (also the legacy rust fixture's home);
+# per-instance psql helpers: sink = the pg14 sink cell;
 # source-primary = the source cell's PG16 primary (objects created here replicate physically
 # to the source-standby, where monarch reads)
 PSQL := $(COMPOSE) exec -T sink psql -U monarch -v ON_ERROR_STOP=1 -q
 SOURCE_PSQL := $(COMPOSE) exec -T source-primary psql -U monarch -v ON_ERROR_STOP=1 -q
 BENCH_COMPOSE := $(COMPOSE) -f bench/compose.yaml
 
-.PHONY: up down install databases schema schema-full-rebuild data reset run demo verify \
-	snapshot opt-in-group traffic evict-sink psql-source psql-standby psql-files psql-sink \
+.PHONY: up down install databases schema schema-full-rebuild data reset run \
+	traffic evict-sink psql-source psql-standby psql-files psql-sink \
 	psql-ledger mock-schema test bench bench-down bench-schema
 
 up:
@@ -67,9 +67,8 @@ mock-schema: databases
 
 # Seed the source cell's databases (and the mock filestore) with example data. Org 1 is seeded
 # large (BIG_ORG_ROWS rows per eligible table, default 50000) so `make run` + a move of org 1 has
-# a copy long enough to watch progress on; every other org stays at 8-40 rows per table, so
-# `ORG=2 make snapshot` is still instant. Lower it -- `make data BIG_ORG_ROWS=2000` -- if the
-# seed itself is taking longer than you want.
+# a copy long enough to watch progress on; every other org stays at 8-40 rows per table. Lower it
+# -- `make data BIG_ORG_ROWS=2000` -- if the seed itself is taking longer than you want.
 # ANALYZE after seeding: monarch's copy_rows_estimate comes from EXPLAIN, which is only as
 # good as the tables' statistics -- freshly seeded tables have none and the planner guesses
 # wildly. Runs on the primary (a standby is read-only) and replicates to the standby, where
@@ -119,13 +118,6 @@ run:
 	done; \
 	wait
 
-# register first: create-publication journals its per-store facts into the registered move,
-# which is what sequences the conductor's snapshot gate (publications only predate the slots)
-snapshot:
-	uv run monarch register --org-id $(ORG)
-	uv run monarch create-publication --org-id $(ORG)
-	uv run monarch snapshot --org-id $(ORG)
-
 # Trickle org-scoped writes into the source primaries so a live move has something to
 # stream (the first org is the mover's subject; org 2's writes must never cross). Run
 # beside the dashboard: stop stream while this runs = lag climbs; restart = catch-up.
@@ -151,35 +143,6 @@ schema:
 schema-full-rebuild:
 	$(COMPOSE) run --rm --build -e MONARCH_REMIGRATE=1 sentry-migrate
 	uv run monarch init-ledger
-
-# Opt one update-heavy table into update/delete filtering for demo
-opt-in-group:
-	$(SOURCE_PSQL) -d source -c 'ALTER TABLE "group" ALTER COLUMN project_id SET NOT NULL'
-	$(SOURCE_PSQL) -d source -c 'CREATE UNIQUE INDEX IF NOT EXISTS group_ri ON "group" (id, project_id)'
-	$(SOURCE_PSQL) -d source -c 'ALTER TABLE "group" REPLICA IDENTITY USING INDEX group_ri'
-
-# Full move demo: snapshot, poke changes, stream them, clean up. Snapshot reads + slots
-# live on the standby (cmd_snapshot nudges pg_log_standby_snapshot for slot creation).
-# Includes a TOAST field: ship a big out-of-line value, then an update that doesn't touch it -- pgoutput
-# omits the unchanged column from the second change and the sink's copy must survive.
-demo: opt-in-group
-	uv run monarch register --org-id $(ORG)
-	uv run monarch create-publication --org-id $(ORG)
-	uv run monarch snapshot --org-id $(ORG)
-	$(SOURCE_PSQL) -d source -c 'INSERT INTO "group" (project_id) VALUES (1)'
-	@key=$$(uv run python mock_storages/write_blob.py 'streamed demo blob'); \
-		$(SOURCE_PSQL) -d source_files -c "INSERT INTO file (project_id, path) VALUES (1, '$$key')"
-	$(SOURCE_PSQL) -d source -c "UPDATE commit SET message = 'BIG-TOASTED-MESSAGE:' || (SELECT string_agg(md5(random()::text), '') FROM generate_series(1, 5000)) WHERE id = 1"
-	$(SOURCE_PSQL) -d source -c "UPDATE commit SET organization_id = 1 WHERE id = 1"
-	PYTHONUNBUFFERED=1 uv run monarch stream --org-id $(ORG) & PID=$$!; sleep 5; kill $$PID
-	uv run monarch drop-slot --org-id $(ORG)
-	uv run monarch drop-publication --org-id $(ORG)
-
-# Check the toast value is still in the sink (assumes `demo` was run)
-verify:
-	@$(SOURCE_PSQL) -d source -c "SELECT 'source' AS side, left(message, 20) AS message_head, length(message) FROM commit WHERE id = 1"
-	@$(PSQL) -d sink -c "SELECT 'sink' AS side, left(message, 20) AS message_head, length(message) FROM commit WHERE id = 1"
-
 
 # Source eviction (post-cutover cleanup, the org has moved) is worker-driven now: finalize +
 # evict-source in the dashboard drive it per store. evict-sink = abort cleanup, clearing a
