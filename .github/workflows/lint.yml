@@ -11,6 +11,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - run: uv sync
-      - run: uv run ruff check monarch mock_storages
-      - run: uv run ruff format --check monarch mock_storages
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
       - run: uv run pyright

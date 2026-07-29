@@ -148,9 +148,11 @@ class Move:
 
     def wrote_to_sink(self) -> bool:
         """True if there is any chance the sink has anything written to it."""
-        return self.conn.execute(
+        row = self.conn.execute(
             "SELECT bool_or(status != 'pending') FROM move_unit WHERE move_id = %s", (self.id,)
-        ).fetchone()[0]
+        ).fetchone()
+        assert row is not None
+        return row[0]
 
     def give_up(self) -> Phase | None:
         """Take the give-up exit the sink picks: aborting when it may hold a partial copy the scrub

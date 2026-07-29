@@ -11,6 +11,7 @@ from __future__ import annotations
 import psycopg
 
 from monarch.config import CONFIG, FLEET, Cell, Graph, connect, load_config
+from monarch.utils import trust_sql
 
 
 def public_tables(conn: psycopg.Connection) -> set[str]:
@@ -29,13 +30,15 @@ def copy_table(source: psycopg.Connection, sink: psycopg.Connection, table: str)
     Binary is exact and needs no per-type handling: both databases cloned the same schema, so
     column order and types match. Returns the row count copied."""
     with sink.cursor() as dst, source.cursor() as src:
-        dst.execute(f'DELETE FROM "{table}"')
-        with src.copy(f'COPY "{table}" TO STDOUT (FORMAT binary)') as reader:
-            with dst.copy(f'COPY "{table}" FROM STDIN (FORMAT binary)') as writer:
+        dst.execute(trust_sql(f'DELETE FROM "{table}"'))
+        with src.copy(trust_sql(f'COPY "{table}" TO STDOUT (FORMAT binary)')) as reader:
+            with dst.copy(trust_sql(f'COPY "{table}" FROM STDIN (FORMAT binary)')) as writer:
                 for block in reader:
                     writer.write(block)
-        dst.execute(f'SELECT count(*) FROM "{table}"')
-        return dst.fetchone()[0]
+        dst.execute(trust_sql(f'SELECT count(*) FROM "{table}"'))
+        row = dst.fetchone()
+        assert row is not None
+        return row[0]
 
 
 def sink_database(cell: Cell) -> str:

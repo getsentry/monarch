@@ -10,6 +10,7 @@ Targets the fleet's `to` cell only, so it can never wipe the source. Demo-only s
 from __future__ import annotations
 
 from monarch.config import CONFIG, FLEET, Cell, connect, load_config
+from monarch.utils import trust_sql
 
 
 def empty_cell(cell: Cell) -> None:
@@ -25,13 +26,15 @@ def empty_cell(cell: Cell) -> None:
             # count first so the report names what is about to be deleted, not just how many tables
             total_rows = 0
             for table in tables:
-                count = conn.execute(f'SELECT count(*) FROM "{table}"').fetchone()[0]
+                row = conn.execute(trust_sql(f'SELECT count(*) FROM "{table}"')).fetchone()
+                assert row is not None
+                count = row[0]
                 if count:
                     total_rows += count
                     print(f"    {table}: {count} rows", flush=True)
             if tables:
                 names = ", ".join(f'"{t}"' for t in tables)
-                conn.execute(f"TRUNCATE {names} CASCADE")
+                conn.execute(trust_sql(f"TRUNCATE {names} CASCADE"))
             print(
                 f"  {database.dbname}: emptied {len(tables)} tables, {total_rows} rows", flush=True
             )
