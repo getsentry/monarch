@@ -170,6 +170,10 @@ def record_scoped_keys(
     transaction."""
     recorded = 0
     for column, store in graph.blobs.get(table, {}).items():
+        # blob_members carries the buckets this move migrates; a column pointing at one it
+        # doesn't has no membership to record, and the key read isn't worth doing
+        if store not in blob_members:
+            continue
         keys = sql.SQL("SELECT DISTINCT {c} FROM {t} WHERE {p} AND {c} IS NOT NULL").format(
             c=sql.Identifier(column), t=sql.Identifier(table), p=pred
         )
@@ -273,7 +277,7 @@ def run_snapshot(
                 store = graph.store_of[table]
                 done_by_store[store] += copied
                 report_progress(store, done_by_store[store])
-            extra = f" + {blobs} key(s)" if table in graph.blobs else ""
+            extra = f" + {blobs} key(s)" if blobs else ""
             print(f"  {table:<16} via {scoped_by:<18} {copied} row(s){extra} -> sink")
 
     # keys holds only parent tables; copied_by_table has the row count for every copied table

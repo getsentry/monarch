@@ -20,7 +20,7 @@ from contextlib import ExitStack, closing
 from . import move, slot
 from .blobs import Bucket, blob_copiers
 from .cell_eviction import run_evict
-from .config import Cell, Graph, connect
+from .config import Cell, Graph, connect, list_migrated_blobs
 from .membership import BlobMembership
 from .snapshot import Source, derive_membership, estimate_rows, read_frozen_ids, run_snapshot
 from .stream import StreamSource, run_streams
@@ -29,6 +29,10 @@ POLL_SECONDS = 1.0
 
 
 def run_worker(store: str, graph: Graph, cells: dict[str, Cell], ledger_dsn: str) -> None:
+    if not graph.stores[store].migrate:
+        # a store the move doesn't carry has no unit to dispatch on, so there is no worker to run
+        print(f"worker[{store}]: not migrated, nothing to do")
+        return
     print(f"worker[{store}]: polling for the live move (Ctrl-C to stop)")
     with closing(connect(ledger_dsn)) as book:
         while True:
@@ -56,7 +60,7 @@ def snapshot(
     src_db = next(db for db in source.databases if store in db.stores)
     sink_db = next(db for db in sink.databases if store in db.stores)
     unit = move.MoveUnit(m, store)
-    blobs = {b for t in graph.store_tables(store) for b in graph.blobs.get(t, {}).values()}
+    blobs = list_migrated_blobs(graph, store)
     blob_members = {b: BlobMembership(book, m.id, b) for b in blobs}
 
     with ExitStack() as stack:
@@ -121,7 +125,7 @@ def stream(
     the slot is retained for a resume."""
     source, sink = (cells[c] for c in m.cells())
     src_db = next(db for db in source.databases if store in db.stores)
-    blobs = {b for t in graph.store_tables(store) for b in graph.blobs.get(t, {}).values()}
+    blobs = list_migrated_blobs(graph, store)
     with ExitStack() as stack:
         sinks = {
             db.primary_dsn: stack.enter_context(connect(db.primary_dsn)) for db in sink.databases
@@ -152,7 +156,7 @@ def evict(
         for s in graph.stores_referencing(store)
     ):
         return  # a referencing store is still holding on; a later poll retries once it's gone
-    blobs = {b for t in graph.store_tables(store) for b in graph.blobs.get(t, {}).values()}
+    blobs = list_migrated_blobs(graph, store)
     with ExitStack() as stack:
         conns = {
             db.primary_dsn: stack.enter_context(connect(db.primary_dsn)) for db in source.databases

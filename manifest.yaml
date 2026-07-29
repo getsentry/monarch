@@ -9,14 +9,22 @@ stores:
   # postgres stores mirror the fleet's clusters (default / attachments / files / ...)
   default:     { type: postgres }
   attachments: { type: postgres }
+  # migrate: false on both buckets -- the bytes do not move with the org, and how they would
+  # move is still open. If buckets became regional there is nothing to transfer at all; if they
+  # stay per-cell it is a bulk server-side transfer, run out of band and gated at cut over.
+  # Neither is a streaming mover, so neither earns a unit. eviction is what would apply once
+  # that settles: today nothing is copied, so there is nothing to evict.
+  #
   # no reclaimer exists in Sentry, we should delete the object when the row is removed
   # (in objectstore's attachments in production a retention TTL also exists as a backstop)
-  objectstore: { type: blob_store, eviction: delete }
-  files:       { type: postgres }
+  objectstore: { type: blob_store, eviction: delete, migrate: false }
+  # An org's rows point AT file metadata and the blob index, so the walk down from the org never
+  # reaches them. A gap, not a decision like the buckets.
+  files:       { type: postgres, migrate: false }
   # filestore is not org/project scoped so it is not safe to delete blobs referenced by
   # a specific project. Sentry's delete_unreferenced_blobs() / cleanup_unused_files()
   # is responsible for GC on the filestore.
-  filestore:   { type: blob_store, eviction: keep }
+  filestore:   { type: blob_store, eviction: keep, migrate: false }
 
 # `project` is marked as static: its id set is assumed not to change during a move.
 # Nothing is enforced on the customer -- a project creation or deletion mid-move fails

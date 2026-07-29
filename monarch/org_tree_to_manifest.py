@@ -96,6 +96,9 @@ BLOB_EVICTION = {
     "filestore": "keep",
     "objectstore": "delete",
 }
+# Stores the move leaves alone. The buckets by decision (bytes don't move with the org); files
+# because an org's rows point at it, so the walk never reaches it -- a gap, not a decision.
+UNMIGRATED_STORES = {"filestore", "objectstore", "files"}
 RELATIONSHIP_FIELD_SUFFIX_TYPES = {
     "DefaultForeignKey",
     "DefaultOneToOneField",
@@ -150,7 +153,7 @@ def convert_org_tree(org_tree: dict[str, Any]) -> dict[str, Any]:
     root = by_model[root_model]["table_name"]
     external_refs = external_refs_by_table(org_tree)
 
-    stores: dict[str, dict[str, str]] = {}
+    stores: dict[str, dict[str, str | bool]] = {}
     for node in nodes:
         stores.setdefault(store_of(node), {"type": "postgres"})
     for store in org_tree["externally_referenced_systems"]:
@@ -158,6 +161,8 @@ def convert_org_tree(org_tree: dict[str, Any]) -> dict[str, Any]:
             "type": "blob_store",
             "eviction": BLOB_EVICTION.get(store, "keep"),
         }
+    for store in UNMIGRATED_STORES & stores.keys():
+        stores[store]["migrate"] = False
 
     relationships: dict[str, dict[str, Any]] = {}
     for node in nodes:

@@ -143,7 +143,7 @@ class Move:
                 == 1
             )
             if moved:
-                self.add_event(f"phase -> {to}" + (f": {note}" if note else ""))
+                self.add_event(f"phase {to}" + (f": {note}" if note else ""))
         return moved
 
     def wrote_to_sink(self) -> bool:
@@ -216,7 +216,7 @@ class MoveUnit:
                 == 1
             )
             if moved:
-                self.add_event(f"-> {to}" + (f": {note}" if note else ""))
+                self.add_event(f"{to}" + (f": {note}" if note else ""))
         return moved
 
     def record_copy_estimate(self, rows: int) -> None:

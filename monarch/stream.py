@@ -218,8 +218,9 @@ def apply_message(
                     for change in changes:
                         # record, don't copy: the worker converges keys -> bucket. DELETEs
                         # carry only the key column, so get() is None and nothing is recorded.
+                        # a bucket the move doesn't migrate isn't in blob_members at all.
                         for column, store in graph.blobs.get(change.table, {}).items():
-                            if (key := change.get(column)) is not None:
+                            if store in blob_members and (key := change.get(column)) is not None:
                                 blob_members[store].add(key)
                         apply_change(conn, change, graph.primary_key_of[change.table])
             st.applied_changes += len(st.pending)

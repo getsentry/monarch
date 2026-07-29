@@ -8,6 +8,7 @@ stores:
     type: postgres
   files:
     type: postgres
+    migrate: false
   attachments:
     type: postgres
   crons:
@@ -17,9 +18,11 @@ stores:
   filestore:
     type: blob_store
     eviction: keep
+    migrate: false
   objectstore:
     type: blob_store
     eviction: delete
+    migrate: false
 relationships:
   sentry_organization:
     store: default

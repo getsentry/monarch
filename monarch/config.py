@@ -26,15 +26,20 @@ def connect(dsn: str) -> psycopg.Connection:
     return psycopg.connect(dsn, autocommit=True)
 
 
+# `migrate` false means no mover unit: no slot, no publication, no stream, no eviction. On a bucket
+# that's a decision about bytes; on a postgres store it can only be a gap, since org data in
+# postgres has to move for the move to be correct.
 @dataclass(frozen=True)
 class PostgresStore:
     name: str
+    migrate: bool
 
 
 @dataclass(frozen=True)
 class BlobStore:
     name: str
     eviction: Eviction  # delete = eviction removes the org's objects; keep = a reclaimer exists
+    migrate: bool
 
 
 Store = PostgresStore | BlobStore
@@ -152,15 +157,16 @@ def load_graph(path: str) -> Graph:
         raw = yaml.safe_load(f)
     stores: dict[str, Store] = {}
     for name, meta in raw["stores"].items():
+        migrate = meta.get("migrate", True)
         match meta["type"]:
             case "postgres":
-                stores[name] = PostgresStore(name)
+                stores[name] = PostgresStore(name, migrate)
             case "blob_store":
                 if (eviction := meta["eviction"]) not in ("delete", "keep"):
                     raise ValueError(
                         f"store {name}: eviction must be delete|keep, got {eviction!r}"
                     )
-                stores[name] = BlobStore(name, eviction)
+                stores[name] = BlobStore(name, eviction, migrate)
             case unknown:
                 raise ValueError(f"store {name}: unknown type {unknown!r}")
     store_of: dict[str, str] = {}
@@ -258,12 +264,19 @@ class Cell:
 
 
 def list_units(graph: Graph, source: Cell) -> list[str]:
-    """Every mover unit a move from `source` needs: its postgres stores plus all blob
-    stores. The one definition every registration path and snapshot's pending-check
-    share, so the two ends of the pipeline can't disagree."""
-    return [store for db in source.databases for store in db.stores] + [
-        name for name, s in graph.stores.items() if isinstance(s, BlobStore)
-    ]
+    """Every mover unit a move from `source` needs: the stores it migrates, postgres and bucket
+    alike. The one definition every registration path and snapshot's pending-check share, so the
+    two ends of the pipeline can't disagree -- and the one place `migrate` decides anything."""
+    hosted = [store for db in source.databases for store in db.stores]
+    buckets = [name for name, s in graph.stores.items() if isinstance(s, BlobStore)]
+    return [name for name in hosted + buckets if graph.stores[name].migrate]
+
+
+def list_migrated_blobs(graph: Graph, store: str) -> set[str]:
+    """The buckets `store`'s tables reference and the move actually copies. One we don't migrate
+    has no unit, no membership and nothing to evict -- its bytes never left the source."""
+    refs = {b for t in graph.store_tables(store) for b in graph.blobs.get(t, {}).values()}
+    return {b for b in refs if isinstance(s := graph.stores[b], BlobStore) and s.migrate}
 
 
 def load_cells(path: str) -> dict[str, Cell]:

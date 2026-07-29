@@ -19,11 +19,18 @@ FLEET = REPO_ROOT / "tests" / "fleet.e2e.yaml"
 def _without_files_store(dest: Path) -> tuple[Path, Path]:
     """Manifest + fleet with the files store dropped whole. It's self-contained -- no other store
     references its tables -- so the remaining config stays consistent and the move never reaches
-    the unscopable fileblob."""
+    the unscopable fileblob.
+
+    Blob stores are also flipped back to `migrate: true`. The shipped manifests say false --
+    whether object bytes move with the org, and by what mechanism, is an open design question --
+    but the copier and its key ledger are built, so this is where they stay exercised."""
     manifest = yaml.safe_load(MANIFEST.read_text())
     for table in [t for t, s in manifest["relationships"].items() if s.get("store") == "files"]:
         del manifest["relationships"][table]
     del manifest["stores"]["files"]
+    for store in manifest["stores"].values():
+        if store["type"] == "blob_store":
+            store["migrate"] = True
     manifest_path = dest / "manifest.no-files.yaml"
     manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
 

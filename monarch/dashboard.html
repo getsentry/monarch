@@ -424,23 +424,29 @@ function appendEvents(events) {
   // them down mid-scroll -- an empty feed reads as "at bottom", so the first load sticks
   const atBottom = ol.scrollHeight - ol.scrollTop - ol.clientHeight < 40;
   for (const e of events) {
+    since = Math.max(since, e.id);
+    // older journals wrote the arrow into the unit's transition text; strip it so it isn't
+    // matched against and doesn't render twice
+    const message = e.unit ? e.message.replace(/^-> /, "") : e.message;
     if (e.unit) {
       const t = unitTimes[e.unit] ??= {};
-      if (e.message.startsWith("-> copying")) t.copying = e.at;
-      else if (e.message.startsWith("-> copied")) t.copied = e.at;
-      // old journals ended the copy on "-> streaming"; ??= keeps new moves' earlier mark
-      else if (e.message.startsWith("-> streaming")) t.copied ??= e.at;
+      // first mark wins: stopping a stream returns the unit to copied and journals a second
+      // copied line, which is not when the snapshot ended
+      if (message.startsWith("copying")) t.copying ??= e.at;
+      else if (message.startsWith("copied")) t.copied ??= e.at;
+      else if (message.startsWith("streaming")) t.copied ??= e.at;  // old journals ended here
     }
+    // noteless transitions: the movers still journal them, the harvest above still reads them
+    if (e.unit && /^[a-z_]+$/.test(message)) continue;
     const li = document.createElement("li");
     const t = document.createElement("span"); t.className = "t";
     t.textContent = new Date(e.at).toLocaleTimeString("en-GB");
     const chip = document.createElement("span"); chip.className = "chip";
     chip.textContent = e.unit ?? "move";
     const x = document.createElement("span"); x.className = "x";
-    x.textContent = e.message;
+    x.textContent = e.unit ? `-> ${message}` : message;
     li.append(t, chip, x);
     ol.appendChild(li);
-    since = Math.max(since, e.id);
   }
   if (events.length && atBottom) ol.scrollTop = ol.scrollHeight;
 }
@@ -487,6 +493,7 @@ async function loadTopology() {
       <div class="nm"><b>${s.name}</b>
         <span class="st" id="storest-${s.name}"></span></div>
       <div class="kind">${s.kind === "blob" ? "bucket" : s.kind}</div>
+      ${s.migrate === false ? `<div class="tbls">not moved</div>` : ""}
       ${s.tables ? `<div class="tbls">${s.tables.length} table${s.tables.length === 1 ? "" : "s"}</div>` : ""}
     </div>`;
   $("stores").innerHTML = topo.stores.filter(s => s.kind === "postgres").map(node).join("");
@@ -514,8 +521,9 @@ function drawEdges() {
       const a = anchor(from, "bottom"), z = anchor(to, "top");
       const my = (a.y + z.y) / 2;
       // liveness key: the store whose stream moves this edge's data (buckets ride their
-      // referencing store's pipe)
-      const liveKey = s.kind === "blob" ? b.to : s.name;
+      // referencing store's pipe). a bucket we don't migrate has no pipe -- the edge is
+      // lineage only, so it never animates
+      const liveKey = s.kind === "blob" ? (s.migrate ? b.to : "") : s.name;
       const touch = `${from.id} ${to.id}`;
       paths += `<path d="M ${a.x} ${a.y} C ${a.x} ${my}, ${z.x} ${my}, ${z.x} ${z.y}"
         fill="none" stroke="var(${b.cross ? "--aqua" : "--edge"})" stroke-width="1.5"
@@ -703,6 +711,12 @@ function storeTip(s, showTopology = true) {
     const ev = s.eviction === "delete"
       ? "eviction: <b>delete</b> — the org's objects are removed with their rows (no reclaimer exists)"
       : "eviction: <b>keep</b> — rows go first, the owning service's GC reclaims unreferenced bytes";
+    if (s.migrate === false)
+      return `<b>${s.name}</b> · bucket<br>referenced by: <b>${refs}</b><br>` +
+        `<b>not moved</b> — the rows that reference these objects move, the bytes stay. Whether ` +
+        `they need to move is open: regional buckets would mean nothing to transfer, per-cell ` +
+        `buckets would mean a bulk server-side transfer out of band, gated at cut over. Neither ` +
+        `is a streaming mover, so this bucket is not a unit.<br>once that settles, ${ev}`;
     return `<b>${s.name}</b> · bucket<br>referenced by: <b>${refs}</b><br>${ev}<br>` +
       `no slot or stream: objects copy alongside their referencing rows`;
   }
@@ -716,6 +730,10 @@ function storeTip(s, showTopology = true) {
     ? ` · db <b>${db ?? "?"}</b>`
       + (mates.length ? ` (with <b>${mates.join(", ")}</b> — own slot and mover)` : "")
     : "");
+  if (s.migrate === false)
+    lines += `<br><b>out of the move</b> — an org's rows point at this store rather than the ` +
+      `other way round, so the walk down from the org never reaches it. A gap, not a decision: ` +
+      `no unit, so no slot and nothing copied.`;
   if (u) {
     lines += `<br>unit status: <b>${u.status.replace("_", " ")}</b>`;
     // one number per line, and the estimate is its own line rather than a parenthetical: the two

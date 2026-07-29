@@ -24,7 +24,7 @@ from psycopg import Connection, errors
 from psycopg.rows import dict_row
 
 from . import move, slot
-from .config import BlobStore, Cell, Graph, list_units
+from .config import BlobStore, Cell, Graph, PostgresStore, list_units
 from .utils import trust_sql
 
 
@@ -49,6 +49,7 @@ def describe_topology(graph: Graph, cells: dict[str, Cell]) -> dict:
                     "kind": "blob",
                     "tables": None,
                     "eviction": store.eviction,
+                    "migrate": store.migrate,
                     "binds": [
                         {"to": b, "cross": False, "label": "/".join(sorted(cols))}
                         for b, cols in sorted(refs.items())
@@ -64,12 +65,23 @@ def describe_topology(graph: Graph, cells: dict[str, Cell]) -> dict:
                     cross.setdefault(e.parent, set()).add(e.column)
             # cross-db scope edges are the loaded ones (the race surface the static spine
             # exists for); the spine's home store still hangs off the root, but over the
-            # same WAL -- drawn quiet, never aqua
+            # same WAL -- drawn quiet, never aqua. A store the move doesn't carry gets no edge
+            # at all: it has no scope path, which is the whole reason it's out.
             binds = [
                 {"to": p, "cross": True, "label": f"{'/'.join(sorted(cols))} · cross-db"}
                 for p, cols in sorted(cross.items())
-            ] or [{"to": graph.root, "cross": False, "label": "same WAL"}]
-            stores.append({"name": name, "kind": "postgres", "tables": tables, "binds": binds})
+            ]
+            if not binds and store.migrate:
+                binds = [{"to": graph.root, "cross": False, "label": "same WAL"}]
+            stores.append(
+                {
+                    "name": name,
+                    "kind": "postgres",
+                    "tables": tables,
+                    "binds": binds,
+                    "migrate": store.migrate,
+                }
+            )
     # no sorting: the manifest's declaration order is meaningful (primary store first),
     # and the page splits postgres/blob into separate rows itself
     spine = [{"table": graph.root, "frozen": False}] + [
@@ -234,9 +246,9 @@ class Handler(BaseHTTPRequestHandler):
             source = self.cells[m.cells()[0]]
             moved = [
                 store
-                for db in source.databases
-                for store in db.stores
-                if move.MoveUnit(m, store).transition(target)
+                for store in list_units(self.graph, source)
+                if isinstance(self.graph.stores[store], PostgresStore)
+                and move.MoveUnit(m, store).transition(target)
             ]
         self._respond(200, "application/json", _to_json({"target": target, "moved": moved}))
 

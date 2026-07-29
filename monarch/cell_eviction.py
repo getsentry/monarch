@@ -64,7 +64,11 @@ def run_evict(
         for table, pred in scoped:
             for column, store in graph.blobs.get(table, {}).items():
                 blob_store = graph.stores[store]
-                if not isinstance(blob_store, BlobStore) or blob_store.eviction != "delete":
+                if not isinstance(blob_store, BlobStore) or not blob_store.migrate:
+                    # a store we don't migrate has no copy on either side to reclaim: the bytes
+                    # never moved, so the ones here are the only ones there are
+                    continue
+                if blob_store.eviction != "delete":
                     continue  # keep: the owning service's GC reclaims after the rows go
                 blob_keys = sql.SQL(
                     "SELECT DISTINCT {c} FROM {t} WHERE {p} AND {c} IS NOT NULL"

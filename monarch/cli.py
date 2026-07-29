@@ -107,7 +107,9 @@ def cmd_snapshot(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: 
             sys.exit(f"no registered move for org {org_id} -- run `register` first")
         source_name, sink_name = m.cells()
         source, sink = cells[source_name], cells[sink_name]
-        blob_names = [name for name, s in graph.stores.items() if isinstance(s, BlobStore)]
+        # the buckets among this move's units -- list_units decides which buckets migrate
+        units_here = list_units(graph, source)
+        blob_names = [u for u in units_here if isinstance(graph.stores[u], BlobStore)]
         # the rerun check exits BEFORE the except below, which would abort the live move;
         # the real claim stays the pending -> copying compare-and-swap at each slot's creation
         for store in list_units(graph, source):
@@ -201,7 +203,9 @@ def cmd_stream(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: st
         source_name, sink_name = m.cells()
         source, sink = cells[source_name], cells[sink_name]
         pg_stores = [store for db in source.databases for store in db.stores]
-        blob_names = [name for name, s in graph.stores.items() if isinstance(s, BlobStore)]
+        # the buckets among this move's units -- list_units decides which buckets migrate
+        units_here = list_units(graph, source)
+        blob_names = [u for u in units_here if isinstance(graph.stores[u], BlobStore)]
         blob_members = {name: BlobMembership(book, m.id, name) for name in blob_names}
         units = {store: move.MoveUnit(m, store) for store in pg_stores + blob_names}
         sinks = {
