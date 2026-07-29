@@ -90,8 +90,9 @@ def snapshot(
         static_keys = {graph.root: [org_id], **frozen_ids}
         name = slot.slot_name(org_id, store)
         with slot.nudge_running_xacts([src_db.primary_dsn] if src_db.standby_dsn else []):
-            _, snap = stack.enter_context(slot.create_slot(src_db.decode_dsn, name))
+            lsn, snap = stack.enter_context(slot.create_slot(src_db.decode_dsn, name))
             sconn = stack.enter_context(connect(src_db.decode_dsn))
+        unit.add_event(f"slot created: {name} at {lsn} on {src_db.dbname}")
         _, copied = run_snapshot(
             [Source(store, sconn, snap)],
             sinks,

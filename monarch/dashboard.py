@@ -28,6 +28,40 @@ from .config import BlobStore, Cell, Graph, PostgresStore, list_units
 from .utils import trust_sql
 
 
+def build_scope_tree(graph: Graph, store: str) -> list[dict]:
+    """This store's tables, each nested under whichever of them scopes it. Top level is what the
+    store's walk starts from: the root if it lives here, otherwise the tables a parent in another
+    store scopes -- which parent that is rides on `binds`, the same edge the diagram draws.
+    Children stay in topological order, which is also the order the copy walks them."""
+    mine = {t for t, s in graph.store_of.items() if s == store}
+    kids_of: dict[str | None, list[str]] = {}
+    for table in graph.topological_sort():
+        if table in mine:
+            edge = graph.scope_edge(table)
+            kids_of.setdefault(edge.parent if edge else None, []).append(table)
+
+    def node(table: str) -> dict:
+        kids = [node(c) for c in kids_of.get(table, [])]
+        # subtree size, so a collapsed branch still says how much it hides
+        return {
+            "table": table,
+            "count": len(kids) + sum(k["count"] for k in kids),
+            "children": kids,
+        }
+
+    roots = []
+    for parent, tables in kids_of.items():
+        if parent in mine:
+            continue  # an edge inside the store: already nested under its parent
+        if parent is None:
+            roots.extend(node(t) for t in tables)  # the root lives here, so it is the top
+        else:
+            # a cross-store parent still heads its branch: it is what the tables hang off, and
+            # `store` says it isn't one of ours
+            roots.append({**node(parent), "store": graph.store_of[parent]})
+    return roots
+
+
 def describe_topology(graph: Graph, cells: dict[str, Cell]) -> dict:
     """Static topology, computed once from the manifest + fleet: the diagram is a rendering
     of config, so a store added to manifest.yaml grows a node with no UI change.
@@ -80,6 +114,7 @@ def describe_topology(graph: Graph, cells: dict[str, Cell]) -> dict:
                     "tables": tables,
                     "binds": binds,
                     "migrate": store.migrate,
+                    "scope_tree": build_scope_tree(graph, name),
                 }
             )
     # no sorting: the manifest's declaration order is meaningful (primary store first),
@@ -306,18 +341,22 @@ class Handler(BaseHTTPRequestHandler):
         never-copied record wrote_to_sink reads."""
         slot.drop_org_slots(source, org)
         slot.drop_org_publications(source, org)
-        # name the dropped publications in the slot_dropped marker itself (one line, not a
-        # second event that restates it); the marker already carries the slot. blob units hold
-        # no slot/publication, so their marker stands bare
+        # a line each, mirroring setup's `slot created` + `publications created`, and in the order
+        # they were dropped. blob units hold no slot/publication, so their marker stands bare
         db_of = {store: db.dbname for db in source.databases for store in db.stores}
         for (unit,) in self.conn.execute(
             "SELECT unit FROM move_unit WHERE move_id = %s", (m.id,)
         ).fetchall():
-            note = None
-            if unit in db_of:
+            handle = move.MoveUnit(m, unit)
+            if unit not in db_of:
+                handle.transition(move.UnitStatus.SLOT_DROPPED)
+                continue
+            note = f"{slot.slot_name(org, unit)} on {db_of[unit]}"
+            # only journal the publications once: a re-run after a partial failure re-drops them
+            # harmlessly, but the transition is what says this teardown is the one that counted
+            if handle.transition(move.UnitStatus.SLOT_DROPPED, note=note):
                 names = "/".join(slot.publication_names(org, unit))
-                note = f"publications {names} on {db_of[unit]}"
-            move.MoveUnit(m, unit).transition(move.UnitStatus.SLOT_DROPPED, note=note)
+                handle.add_event(f"publications dropped: {names} on {db_of[unit]}")
 
     def _finalize(self, body) -> None:
         """Teardown, its own called-out step: drop the slots + publications, mark each unit

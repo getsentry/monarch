@@ -281,7 +281,7 @@ const storeCard = s => {
 graphEl.insertAdjacentHTML("beforeend", `
   <div class="grow">
     <div class="spinecard" id="spine" data-node="spine">
-      <div class="spinelab">spine · fixed for the move — every cross-store edge binds here</div>
+      <div class="spinelab">fixed for the move — every cross-store edge binds here</div>
       <div class="minis">${SPINE.map(n =>
         `<div class="mini" id="m-${n}"><b>${FROZEN.has(n) ? "📌 " : ""}${n}</b>` +
         `<span class="mv" id="tv-${n}">0 / ${COUNT[n]}</span>` +

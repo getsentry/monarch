@@ -71,6 +71,17 @@
                    border: 1px solid var(--border); border-radius: 999px;
                    font-size: 9px; color: var(--muted); cursor: help; }
 
+  /* scope tree: the store's tables nested by what scopes them, collapsed until clicked open */
+  .tree { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+          max-height: 360px; overflow: auto; }
+  .tree summary { cursor: pointer; list-style: none; padding: 1px 0; }
+  .tree summary::-webkit-details-marker { display: none; }
+  .tree summary::before { content: "▸"; display: inline-block; width: 11px; color: var(--muted); }
+  .tree details[open] > summary::before { content: "▾"; }
+  .tree .kids { margin-left: 5px; padding-left: 8px; border-left: 1px solid var(--grid); }
+  .tree .leaf { padding: 1px 0 1px 11px; }
+  .tree .by { color: var(--muted); }
+
   /* ---- topology (structure from config, status tint from the ledger) ---- */
   #topo { margin-bottom: 16px; }
   .graph { position: relative; }
@@ -111,7 +122,11 @@
   .snode .tbls { font-size: 11.5px; color: var(--muted); margin-top: 4px;
                  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .snode .bind { font-size: 11px; color: var(--ink-2); margin-top: 2px; }
-  .snode, .mini { cursor: default; }
+  .mini { cursor: default; }
+  /* a store's detail is clicked, not hovered -- it holds an expandable tree, so it has to stay */
+  .snode { cursor: pointer; }
+  .snode:hover { border-color: var(--edge);
+                 background: color-mix(in srgb, var(--grid) 35%, var(--surface)); }
   /* actions: outline while waiting -- unmet gates in the tooltip, never the
      label -- filled solid when armed; danger actions stay red */
   #actions-toggle { position: fixed; left: 18px; top: 18px; z-index: 20;
@@ -141,6 +156,15 @@
          padding: 8px 12px; font-size: 12px; line-height: 1.5; color: var(--ink-2);
          box-shadow: 0 4px 14px rgba(0, 0, 0, 0.14); pointer-events: none; }
   #tip b { color: var(--ink); }
+  /* the scope tree is clicked into, not hovered: unlike #tip it takes pointer events and stays
+     until dismissed, so its rows can be expanded */
+  #storepop { position: fixed; z-index: 20; display: none; width: 340px;
+             background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+             padding: 8px 12px 10px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18); }
+  #storepop.open { display: block; }
+  #storepop { font-size: 12px; line-height: 1.5; color: var(--ink-2); }
+  #storepop b { color: var(--ink); }
+  #storepop .x { float: right; cursor: pointer; color: var(--muted); margin-left: 8px; }
 
   #units { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
            gap: 12px; margin-bottom: 16px; }
@@ -242,6 +266,7 @@
   </article>
 </div>
 <div id="tip"></div>
+<div id="storepop"></div>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -485,7 +510,7 @@ async function loadTopology() {
   try { topo = await (await fetch("/graph")).json(); } catch { return; }
   for (const s of topo.stores) if (s.kind === "blob") blobStores.add(s.name);
   $("spine").innerHTML = `<div class="spinecard">` +
-    `<div class="spinelab">spine · fixed for the move — every cross-store edge binds here</div>` +
+    `<div class="spinelab">fixed for the move — every cross-store edge binds here</div>` +
     `<div class="minis">${topo.spine.map(s =>
       `<div class="mini" id="spine-${s.table}">${s.frozen ? "📌 " : ""}${s.table}</div>`).join("")}</div></div>`;
   const node = s => `
@@ -598,7 +623,7 @@ const ACTIONS = [
       return true;
     },
     arm: m => streaming ? null : "no stream running" },
-  { label: "drain + cut over",
+  { label: "cut over",
     run: async note => {
       const { ok, status, body } = await post("/cutover", { move: +pinned });
       if (!ok) { note(body.error ?? `failed (${status}) — restart \`monarch dashboard\`?`); return false; }
@@ -700,10 +725,56 @@ $("actionbtns").addEventListener("click", async e => {
 // ---- popovers: the diagram stays sparse; context lives in hover, built at hover time
 // from config (topo) + the latest poll (lastMove/lastUnits) so it's always current
 // `streaming` = any unit is in the streaming status (the move-level gates key off it);
+// scope tree: one store at a time, since the walk is per-store. click a postgres node to switch.
+// the first level opens so the card lands on the shape rather than a single closed row
+let openedStore = null;
+
+function treeNode(n) {
+  // a leaf's count is always 0, so it says nothing worth the ink
+  const meta = [n.count ? `(${n.count})` : "", n.store ? `in ${n.store}` : ""].filter(Boolean);
+  const by = meta.length ? ` <span class="by">${meta.join(" ")}</span>` : "";
+  if (!n.children.length) return `<div class="leaf">${n.table}${by}</div>`;
+  return `<details><summary>${n.table}${by}</summary>`
+    + `<div class="kids">${n.children.map(treeNode).join("")}</div></details>`;
+}
+
+function openStore(name, anchor) {
+  const s = topo?.stores.find(x => x.name === name);
+  if (!s) return;
+  openedStore = name;
+  const pop = $("storepop");
+  // buckets land here too, so every node in the diagram opens the same way -- theirs is prose
+  // with no tree. the top level opens so the click lands on something already expanded
+  pop.innerHTML = `<span class="x">✕</span>${storeTip(s)}`;
+  pop.classList.add("open");
+  for (const d of pop.querySelectorAll(".tree > details")) d.open = true;
+  // anchored to the node, clamped so a store near an edge doesn't push it off screen
+  const b = anchor.getBoundingClientRect();
+  pop.style.left = `${Math.min(b.left, window.innerWidth - pop.offsetWidth - 10)}px`;
+  pop.style.top = `${Math.min(b.bottom + 8, window.innerHeight - pop.offsetHeight - 10)}px`;
+}
+
+function closeStore() {
+  openedStore = null;
+  $("storepop").classList.remove("open");
+}
+
+document.addEventListener("click", e => {
+  const node = e.target.closest?.(".snode");
+  if (node) return openStore(node.id.slice(5), node);
+  // inside the popover the clicks belong to its disclosure rows, except the close control
+  if (e.target.closest?.("#storepop")) {
+    if (e.target.classList.contains("x")) closeStore();
+    return;
+  }
+  closeStore();
+});
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeStore(); });
+
 // per-unit liveness is heartbeat freshness, read in the popover
 let lastMove = null, lastUnits = [], streaming = false;
 
-function storeTip(s, showTopology = true) {
+function storeTip(s) {
   const cell = lastMove?.source_cell ?? Object.keys(topo.placement)[0];
   const placement = topo.placement[cell] ?? {};
   if (s.kind === "blob") {
@@ -720,55 +791,24 @@ function storeTip(s, showTopology = true) {
     return `<b>${s.name}</b> · bucket<br>referenced by: <b>${refs}</b><br>${ev}<br>` +
       `no slot or stream: objects copy alongside their referencing rows`;
   }
-  const db = placement[s.name];
-  const mates = topo.stores.filter(o => o.kind === "postgres" && o.name !== s.name
-    && placement[o.name] === db).map(o => o.name);
-  const u = lastUnits.find(x => x.unit === s.name);
-  // placement and the table list are topology, so they ride the diagram hover only -- on a
-  // progress row they're noise. the diagram draws no db grouping, so this tip is its only home
-  let lines = `<b>${s.name}</b> · postgres` + (showTopology
-    ? ` · db <b>${db ?? "?"}</b>`
-      + (mates.length ? ` (with <b>${mates.join(", ")}</b> — own slot and mover)` : "")
-    : "");
+  // the diagram draws no db grouping, so this panel is its only home
+  const lines = `<b>${s.name}</b> · postgres · db <b>${placement[s.name] ?? "?"}</b>`;
+  // a store the move leaves out has no walk to draw: the reason it has none is the whole panel
   if (s.migrate === false)
-    lines += `<br><b>out of the move</b> — an org's rows point at this store rather than the ` +
-      `other way round, so the walk down from the org never reaches it. A gap, not a decision: ` +
-      `no unit, so no slot and nothing copied.`;
-  if (u) {
-    lines += `<br>unit status: <b>${u.status.replace("_", " ")}</b>`;
-    // one number per line, and the estimate is its own line rather than a parenthetical: the two
-    // are measured differently -- one counted by COPY, one guessed by the planner -- and nothing
-    // here divides them. the label says which is which
-    if (u.copy_rows_total != null) lines += `<br>rows copied: <b>${fmt(u.copy_rows_total)}</b>`;
-    else if (u.copy_rows_done != null) lines += `<br>rows copied so far: <b>${fmt(u.copy_rows_done)}</b>`;
-    if (u.copy_rows_estimate != null) lines += `<br>planner estimate: ~${fmt(u.copy_rows_estimate)}`;
-    // only run_streams beats, so a copying unit has nothing to report -- saying "no heartbeat"
-    // there reads as a dead mover when the mover is mid-copy. silence is only alarming while
-    // streaming, which is the one status that promises a beat
-    // "not streaming", not "not running": only run_streams beats, so a stale beat means the
-    // stream ended -- the worker itself is still alive and polling. stale WHILE streaming is the
-    // case this is here to catch, and there it means the mover died
-    if (u.heartbeat_at) lines += `<br>mover: <b>${Date.now() - new Date(u.heartbeat_at) < 15000 ? "alive" : "not streaming"}</b>` +
-      ` — last heartbeat ${fmtDur(Date.now() - new Date(u.heartbeat_at))} ago`;
-    else if (u.status === "streaming") lines += `<br>mover: <b>no heartbeat</b> — streaming but silent`;
-    if (u.status === "streaming" && lagBytes(u) != null)
-      lines += `<br>stream: lag <b>${fmtBytes(lagBytes(u))}</b>` +
-        (u.applied_changes != null ? ` · <b>${fmt(+u.applied_changes)}</b> changes applied` : "") +
-        ` · at ${u.applied}` +
-        (u.last_commit_at
-          ? ` (committed ${fmtDur(Date.now() - new Date(u.last_commit_at))} ago)` : "") +
-        ` · head ${u.head}`;
-  }
-  return lines + (showTopology ? `<br>tables: ${s.tables.join(", ")}` : "");
+    return lines + `<br><b>out of the move — not currently safe to copy</b>. Org-scoped rows ` +
+      `point <i>at</i> these tables, so membership has to come in reverse. And their identity is ` +
+      `a content checksum shared across orgs, so the sink may already hold the same bytes under ` +
+      `a different id.`;
+  return lines + `<div class="tree">${s.scope_tree.map(treeNode).join("")}</div>`;
 }
 
 function spineTip(name) {
   const s = topo.spine.find(x => x.table === name);
   if (!s) return "";
   return s.frozen
-    ? `<b>📌 ${name}</b> — static for the move: its id set is assumed not to change ` +
-      `(a create or delete fails the move), so every cross-database edge resolves ` +
-      `against a fixed id set (race-free)`
+    ? `<b>📌 ${name}</b> — its id set is assumed not to change mid-move, so cross-database ` +
+      `edges resolve against a fixed set. A create or delete fails the move and it can be ` +
+      `restarted.`
     : `<b>${name}</b> — the root: the move is every row reachable from one ${name}`;
 }
 
@@ -809,12 +849,13 @@ document.addEventListener("mousemove", e => {
   const unit = el?.dataset.unit;
   const unitStore = unit ? topo.stores.find(s => s.name === unit) : null;
   highlightEdges(unitStore ? `node-${unit}` : el?.id || null);
-  if (!help && !el) { tip.style.display = "none"; return; }
+  // an open scope tree owns the pointer: a tip chasing the cursor over it would cover the rows
+  if (openedStore || (!help && !el)) { tip.style.display = "none"; return; }
+  // only the anchor minis and the help badges are hovered for text now: a card row says its own
+  // progress, and a store node is clicked
   const html = help ? HELP[help.dataset.help]
-    : unitStore ? storeTip(unitStore, false)  // card row: progress, not topology
-    : unit ? null
     : el.id.startsWith("spine-") ? spineTip(el.id.slice(6))
-    : storeTip(topo.stores.find(s => `node-${s.name}` === el.id));
+    : null;
   if (!html) { tip.style.display = "none"; return; }
   tip.innerHTML = html;
   tip.style.display = "block";
