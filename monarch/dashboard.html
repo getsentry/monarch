@@ -122,8 +122,6 @@
                  text-transform: uppercase; color: var(--muted); margin-top: 1px; }
   .snode .tbls { font-size: 11.5px; color: var(--muted); margin-top: 4px;
                  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .snode .bind { font-size: 11px; color: var(--ink-2); margin-top: 2px; }
-  .mini { cursor: default; }
   /* a store's detail is clicked, not hovered -- it holds an expandable tree, so it has to stay */
   .snode { cursor: pointer; }
   .snode:hover { border-color: var(--edge);
@@ -169,13 +167,6 @@
   #storepop ul { margin: 4px 0 0; padding-left: 15px; }
   #storepop li { margin: 1px 0; }
 
-  #units { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-           gap: 12px; margin-bottom: 16px; }
-  .unit .nm { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
-  .unit .nm b { font-size: 14px; }
-  .unit .st { font-size: 10px; font-weight: 700; letter-spacing: 0.05em;
-              text-transform: uppercase; }
-  .unit .st::before { content: "●"; margin-right: 5px; font-size: 8px; vertical-align: 1px; }
   .kv { display: flex; justify-content: space-between; font-size: 13px;
         color: var(--ink-2); margin-top: 6px; }
   .kv span:first-child { flex: none; }
@@ -186,7 +177,6 @@
                   font-variant-numeric: tabular-nums; }
   #snaprows .kv span:last-child { color: var(--ink-2); text-align: right; }
   #snaprows .kv span.hit { color: var(--good); }
-  /* the row carries the same detail the diagram node does, so it hovers like one */
   .lagbar { height: 4px; border-radius: 2px; background: var(--grid); overflow: hidden;
             margin: 1px 0 7px; }
   .lagbar div { height: 100%; width: 0%; background: var(--blue); border-radius: 2px;
@@ -325,8 +315,7 @@ async function pollMoves() {
   }
   lastMove = moves.find(m => !TERMINAL.has(m.phase)) ?? null;  // "register move" arming
   if (!moves.length) {
-    $("mvrows").innerHTML = `<div class="mvrow"><div class="l1">no moves yet</div>` +
-      `<div class="l2">register one to begin</div></div>`;
+    $("mvrows").innerHTML = `<div class="mvrow"><div class="l1">no moves yet</div></div>`;
   } else {
     const clock = at => new Date(at).toLocaleString("en-GB",
       { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
@@ -841,21 +830,10 @@ function spineTip(name) {
 }
 
 // card explainers, same #tip keyed by data-help. drain readiness earns one: its bar measures
-// silence, not progress, so it has to say what the silence is evidence of
+// silence, not progress
 const HELP = {
-  drain: `<b>drain readiness</b> — the cut-over question: has writing to this store stopped?`
-    + `<br>Two conditions, in order. <b>Caught up</b>: the mover has applied everything Postgres`
-    + ` has handed it (lag 0). Necessary, not sufficient — upstream can still be producing.`
-    + ` <b>Quiet</b>: nothing new for <b>30 seconds</b>. Silence is the only evidence we have that`
-    + ` request handlers, ingest buffers and delayed tasks have all stopped landing rows; any`
-    + ` write restarts the clock.`
-    + `<br>The clock reads the source commit time of the last transaction this store's slot`
-    + ` delivered, so a write to these tables by another org resets it too — the gate errs long,`
-    + ` never short.`
-    + `<br>rows: <b>catching up…</b> lag &gt; 0 · <b>never written to</b> the org has no rows here,`
-    + ` nothing to drain (grey) · <b>no writes for Xs</b> counting up · <b>✓</b> drained, ready to`
-    + ` cut over.`
-    + `<br>Demo caveat: cut-over doesn't enforce this yet — shown, not gated.`,
+  drain: `<b>drain readiness</b> — has writing to this store stopped?`
+    + `<br>Caught up, then quiet for <b>30s</b>: we infer upstream writers have stopped.`,
 };
 
 const tip = $("tip");

@@ -225,9 +225,11 @@ def apply_message(
                         apply_change(conn, change, graph.primary_key_of[change.table])
             st.applied_changes += len(st.pending)
             st.pending.clear()
+            # the org's clock, not the slot's: publication filters are a superset, so
+            # out-of-scope commits are delivered too, and one must not read as org activity
+            st.last_commit_at = item.ts
         st.cursor.send_feedback(flush_lsn=msg.data_start)
         st.applied_lsn = msg.data_start
-        st.last_commit_at = item.ts
         st.in_txn = False
 
 
