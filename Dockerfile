@@ -28,6 +28,8 @@ ENV PATH="/app/.venv/bin:$PATH"
 # Cell independent schema manifest
 COPY manifest.generated.yaml ./
 
+COPY mock_storages/ ./mock_storages/
+
 # Dashboard UI runs on 8008, workers don't expose anything.
 EXPOSE 8008
 
