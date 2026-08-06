@@ -510,6 +510,7 @@ async function poll() {
 }
 
 let topo = null;
+let sourceCell = null;  // the cell a move starts from (fleet.yaml `from`), via /orgs
 async function loadTopology() {
   // structure is config, fetched once; poll() overlays each store's unit status
   try { topo = await (await fetch("/graph")).json(); } catch { return; }
@@ -890,11 +891,14 @@ function tintStores(m, units) {
 }
 
 async function loadOrgs() {
-  // fetched once at load, like the topology; refresh to re-read after seeding
+  // fetched once at load, like the topology; refresh to re-read after seeding. every cell's
+  // orgs are listed -- after a move an org really is in both -- but only the ones on the
+  // source cell are selectable: a move runs one direction, fixed by fleet.yaml `from`
   let orgs;
-  try { ({ orgs } = await (await fetch("/orgs")).json()); } catch { return; }
+  try { ({ orgs, source_cell: sourceCell } = await (await fetch("/orgs")).json()); } catch { return; }
   $("orgpick").innerHTML = `<option value="">org to move…</option>` + orgs.map(o =>
-    `<option value="${o.cell}:${o.id}">${o.id} · ${o.name} — in ${o.cell}</option>`).join("");
+    `<option value="${o.cell}:${o.id}" ${o.cell === sourceCell ? "" : "disabled"}>`
+    + `${o.id} · ${o.name} — in ${o.cell}</option>`).join("");
 }
 
 loadTopology();

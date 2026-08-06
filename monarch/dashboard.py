@@ -155,12 +155,14 @@ def read_state(conn: Connection, since: int, move_id: int | None = None) -> dict
     return {"move": m, "units": units, "events": events}
 
 
-def read_orgs(graph: Graph, cells: dict[str, Cell]) -> dict:
+def read_orgs(graph: Graph, cells: dict[str, Cell], source_cell: str) -> dict:
     """The fleet's orgs, read live from each cell's root table: the registration-time
     control-plane read (production would ask routing which orgs live where). This is the
     one place the dashboard looks at a cell -- move progress stays mover-fed. A cell that
     can't be reached just lists nothing; post-cutover an org honestly appears in both
-    cells until eviction removes the frozen source copy."""
+    cells until eviction removes the frozen source copy. `source_cell` is the fleet's
+    `from`, sent so the picker can list every org but offer only the movable ones -- cell
+    names are config, so the page can't tell which cell is the source on its own."""
     store = graph.store_of[graph.root]
     root_key = graph.primary_key_of[graph.root][0]
     orgs = []
@@ -173,7 +175,7 @@ def read_orgs(graph: Graph, cells: dict[str, Cell]) -> dict:
         except psycopg.OperationalError:
             continue
         orgs.extend({"id": r[0], "name": r[1], "cell": cell.name} for r in rows)
-    return {"orgs": orgs}
+    return {"orgs": orgs, "source_cell": source_cell}
 
 
 def read_moves(conn: Connection) -> dict:
@@ -199,6 +201,7 @@ class Handler(BaseHTTPRequestHandler):
         topology: dict,
         graph: Graph,
         cells: dict[str, Cell],
+        source_cell: str,
         *args,
         **kwargs,
     ) -> None:
@@ -206,6 +209,7 @@ class Handler(BaseHTTPRequestHandler):
         self.topology = topology
         self.graph = graph
         self.cells = cells
+        self.source_cell = source_cell
         super().__init__(*args, **kwargs)
 
     def do_POST(self) -> None:
@@ -478,7 +482,11 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path == "/moves":
             self._respond(200, "application/json", _to_json(read_moves(self.conn)))
         elif url.path == "/orgs":
-            self._respond(200, "application/json", _to_json(read_orgs(self.graph, self.cells)))
+            self._respond(
+                200,
+                "application/json",
+                _to_json(read_orgs(self.graph, self.cells, self.source_cell)),
+            )
         elif url.path == "/graph":
             self._respond(200, "application/json", _to_json(self.topology))
         elif url.path == "/":
@@ -508,10 +516,15 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def run_dashboard(
-    conn: Connection, port: int, graph: Graph, cells: dict[str, Cell], host: str = "127.0.0.1"
+    conn: Connection,
+    port: int,
+    graph: Graph,
+    cells: dict[str, Cell],
+    source_cell: str,
+    host: str = "127.0.0.1",
 ) -> None:
     """Single-threaded on purpose: one shared ledger connection, one polling client."""
     topology = describe_topology(graph, cells)
-    server = HTTPServer((host, port), partial(Handler, conn, topology, graph, cells))
+    server = HTTPServer((host, port), partial(Handler, conn, topology, graph, cells, source_cell))
     print(f"dashboard: http://{host}:{port}")
     server.serve_forever()

@@ -359,7 +359,14 @@ def main() -> None:
         case "dashboard":
             with connect(ledger_dsn) as conn:
                 try:
-                    dashboard.run_dashboard(conn, args.port, graph, cells, args.host)
+                    dashboard.run_dashboard(
+                        conn,
+                        args.port,
+                        graph,
+                        cells,
+                        config.from_cell,
+                        args.host,
+                    )
                 except KeyboardInterrupt:
                     pass
 
