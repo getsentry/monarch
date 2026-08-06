@@ -1,7 +1,9 @@
-"""End-to-end move: drive the real `monarch` CLI through a full move of every store EXCEPT files,
-then assert org 1 landed in the sink and org 2 never crossed. The content-addressed files store
-isn't movable yet (its tables have no foreign-key path back to an organization), so it's dropped
-from the manifest+fleet this move runs against.
+"""End-to-end move: drive the real `monarch` CLI through a full move of every store EXCEPT files
+(what `make move` runs), then assert org 1 landed in the sink, left the source, and took its
+plumbing with it -- while org 2 never crossed. No stream: the stack is quiet, so the snapshot is
+the whole copy. The content-addressed files store isn't movable yet (its tables have no
+foreign-key path back to an organization), so it's dropped from the manifest+fleet this move
+runs against.
 """
 
 import os
@@ -65,11 +67,12 @@ def _a_default_child_of_root() -> str:
     raise AssertionError("no default-store child of the root in the manifest")
 
 
-def test_snapshot_moves_org_to_sink(e2e_stack, tmp_path):
+def test_move_copies_org_and_evicts_source(e2e_stack, tmp_path):
+    """`make move`: org 1 lands in the sink, leaves the source, and no plumbing survives."""
     manifest, fleet = _without_files_store(tmp_path)
     _monarch("register", "--org-id", "1", manifest=manifest, fleet=fleet)
-    _monarch("create-publication", "--org-id", "1", manifest=manifest, fleet=fleet)
     _monarch("snapshot", "--org-id", "1", manifest=manifest, fleet=fleet)
+    _monarch("finalize", "--org-id", "1", manifest=manifest, fleet=fleet)
 
     with psycopg.connect(e2e_stack["sink_dsn"]) as conn:
         orgs = [r[0] for r in conn.execute("SELECT id FROM sentry_organization ORDER BY id")]
@@ -78,3 +81,28 @@ def test_snapshot_moves_org_to_sink(e2e_stack, tmp_path):
         assert conn.execute(f'SELECT count(*) FROM "{child}"').fetchone()[0] > 0, (
             f"expected org 1's {child} rows in the sink"
         )
+
+    # the root lives in the `default` store, on the first source database
+    with psycopg.connect(e2e_stack["source_dbs"][0]["primary_dsn"]) as conn:
+        orgs = [r[0] for r in conn.execute("SELECT id FROM sentry_organization ORDER BY id")]
+        assert 1 not in orgs, "org 1 should be evicted from the source"
+        assert orgs, "the other orgs should still be on the source"
+
+    # what a snapshot with no teardown leaks: a slot retains WAL until its disk fills
+    for db in e2e_stack["source_dbs"]:
+        with psycopg.connect(db["standby_dsn"]) as conn:
+            slots = conn.execute(
+                "SELECT slot_name FROM pg_replication_slots WHERE slot_name LIKE 'monarch_org_1%'"
+            ).fetchall()
+            assert slots == [], f"leaked slots on {db['standby_dsn']}: {slots}"
+        with psycopg.connect(db["primary_dsn"]) as conn:
+            pubs = conn.execute(
+                "SELECT pubname FROM pg_publication WHERE pubname LIKE 'monarch_org_1%'"
+            ).fetchall()
+            assert pubs == [], f"leaked publications on {db['primary_dsn']}: {pubs}"
+
+    with psycopg.connect(e2e_stack["ledger_dsn"]) as conn:
+        phase = conn.execute("SELECT phase FROM move ORDER BY id DESC LIMIT 1").fetchone()
+        assert phase[0] == "finalized", f"expected a finalized move, got {phase[0]}"
+        statuses = {r[0] for r in conn.execute("SELECT DISTINCT status FROM move_unit")}
+        assert statuses == {"evicted"}, f"expected every unit evicted, got {statuses}"

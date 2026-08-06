@@ -127,7 +127,11 @@ def e2e_stack():
             _psql("source-primary", name, "ANALYZE;")
 
         _wait_for_replica([db["standby_dsn"] for db in source_dbs])
-        yield {"sink_dsn": sink_dsn}
+        yield {
+            "sink_dsn": sink_dsn,
+            "source_dbs": source_dbs,
+            "ledger_dsn": fleet["ledger"]["dsn"],
+        }
     finally:
         _compose("down", "-v")
         shutil.rmtree(BUCKETS, ignore_errors=True)

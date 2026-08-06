@@ -8,10 +8,20 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from . import dashboard, move, slot, worker
 from .blobs import Bucket, blob_copiers
-from .config import CONFIG, FLEET, BlobStore, Cell, Graph, connect, list_units, load_config
+from .config import (
+    CONFIG,
+    FLEET,
+    BlobStore,
+    Cell,
+    Graph,
+    PostgresStore,
+    connect,
+    list_units,
+    load_config,
+)
 from .cell_eviction import run_evict
 from .membership import BlobMembership
-from .snapshot import Source, derive_membership, estimate_rows, read_frozen_ids, run_snapshot
+from .snapshot import derive_membership, read_frozen_ids
 from .stream import StreamSource, run_streams
 from .utils import trust_sql
 
@@ -30,9 +40,14 @@ def cmd_create_publication(org_id: int, graph: Graph, source: Cell, ledger_dsn: 
         book = stack.enter_context(connect(ledger_dsn))
         m = move.find_active(book, org_id)
         frozen_ids = read_frozen_ids(graph, source, conns, org_id)
+        # a store the move doesn't carry has no unit, so nothing subscribes to its publications
+        # and journaling against it violates move_event's foreign key
+        units = set(list_units(graph, source))
         first = True
         for db in source.databases:
             for store in db.stores:
+                if store not in units:
+                    continue
                 ins_filters, mut_filters = slot.build_row_filters(
                     graph, graph.store_tables(store), org_id, frozen_ids, conns[db.decode_dsn]
                 )
@@ -98,98 +113,67 @@ def cmd_register(org_id: int, graph: Graph, source: Cell, sink: Cell, ledger_dsn
 
 
 def cmd_snapshot(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: str) -> None:
-    # Slot guards span the whole snapshot: every source database's slot + pinned connection
-    # must outlive the snapshot transactions, and a failure anywhere drops the slots (slot.py).
-    with ExitStack() as stack:
-        book = stack.enter_context(connect(ledger_dsn))
+    """The dashboard's /snapshot route and every worker's reaction to it, in one process: the
+    same claim, the same per-store mover, so the ledger state left behind is the state the
+    dashboard would have written and a move started here continues there. Serial -- each store's
+    snapshot is already independent (the static spine is handed in), so the loop only costs
+    wall clock, and a failure leaves the move live at copying to be resumed or aborted."""
+    with closing(connect(ledger_dsn)) as book:
         m = move.find_active(book, org_id)
         if m is None:
             sys.exit(f"no registered move for org {org_id} -- run `register` first")
-        source_name, sink_name = m.cells()
-        source, sink = cells[source_name], cells[sink_name]
-        # the buckets among this move's units -- list_units decides which buckets migrate
-        units_here = list_units(graph, source)
-        blob_names = [u for u in units_here if isinstance(graph.stores[u], BlobStore)]
-        # the rerun check exits BEFORE the except below, which would abort the live move;
-        # the real claim stays the pending -> copying compare-and-swap at each slot's creation
-        for store in list_units(graph, source):
-            if move.MoveUnit(m, store).status() is not move.UnitStatus.PENDING:
+        source = cells[m.cells()[0]]
+        stores = [
+            s for s in list_units(graph, source) if isinstance(graph.stores[s], PostgresStore)
+        ]
+        m.add_event("snapshot requested")
+        # the claim, exactly as the dashboard writes it: pending -> copying per unit, and a
+        # store that isn't pending has been snapshotted already
+        for store in stores:
+            if not move.MoveUnit(m, store).transition(move.UnitStatus.COPYING):
                 sys.exit(f"move #{m.id} already snapshotted ({store} is not pending)")
-        try:
-            sinks = {
-                db.primary_dsn: stack.enter_context(connect(db.primary_dsn))
-                for db in sink.databases
-            }
+        for store in stores:
+            worker.snapshot(store, org_id, graph, cells, book, m)
+
+
+def cmd_finalize(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: str) -> None:
+    """Finish a snapshot-only move: tear down the plumbing (nothing is streaming, so the slots
+    would retain WAL forever), delete the org from the source, and finalize. The dashboard
+    splits the same path in two -- /finalize stops at evicting and each worker deletes its own
+    store -- but with no workers running there is nothing to hand off to, so the eviction is
+    one central call here."""
+    with closing(connect(ledger_dsn)) as book:
+        m = move.find_active(book, org_id)
+        if m is None:
+            sys.exit(f"no live move for org {org_id}")
+        source, sink = (cells[c] for c in m.cells())
+        units = list_units(graph, source)
+        m.transition(move.Phase.DRAINING, note="snapshot only: no stream, nothing to drain")
+        m.transition(move.Phase.CUT_OVER, note="snapshot only: no routing flip")
+        slot.drop_org_slots(source, org_id)
+        slot.drop_org_publications(source, org_id)
+        for store in units:
+            move.MoveUnit(m, store).transition(move.UnitStatus.SLOT_DROPPED)
+        m.transition(move.Phase.EVICTING, note="teardown done; deleting the source copy")
+        with ExitStack() as stack:
             conns = {
-                db.decode_dsn: stack.enter_context(connect(db.decode_dsn))
+                db.primary_dsn: stack.enter_context(connect(db.primary_dsn))
                 for db in source.databases
             }
-            frozen_ids = read_frozen_ids(graph, source, conns, org_id)
-            # gate, not autocreate: the publications must predate the slots' consistent points
-            # (pgoutput resolves them through each transaction's historic catalog snapshot), so
-            # a missing one can't be fixed after the fact -- fail before the full scan
-            for db in source.databases:
-                for store in db.stores:
-                    for name in slot.publication_names(org_id, store):
-                        if not slot.publication_exists(conns[db.decode_dsn], name):
-                            sys.exit(f"publication {name} missing on {db.dbname}")
-            sources = []
-            units: dict[str, move.MoveUnit] = {}  # by store, for the copy progress callback
-            # slot creation on a standby blocks until a running-xacts record arrives from
-            # the primary over physical replication -- an idle primary may not emit one for
-            # minutes, so drip them ourselves until every slot has its consistent point.
-            # a standby set = decode happens there; a plain primary needs no nudge
-            primary_dsns = [db.primary_dsn for db in source.databases if db.standby_dsn]
-            with slot.nudge_running_xacts(primary_dsns):
-                for db in source.databases:
-                    for store in db.stores:
-                        name = slot.slot_name(org_id, store)
-                        lsn, snapshot = stack.enter_context(slot.create_slot(db.decode_dsn, name))
-                        print(f"slot {name} created at LSN {lsn} (snapshot {snapshot})")
-                        unit = units[store] = move.MoveUnit(m, store)
-                        unit.transition(move.UnitStatus.COPYING, note=f"slot {name} at {lsn}")
-                        # each store gets its own pinned connection -- colocated stores read
-                        # their shared database on separate exported snapshots
-                        sconn = stack.enter_context(connect(db.decode_dsn))
-                        unit.record_copy_estimate(
-                            estimate_rows(
-                                sconn, graph, graph.store_tables(store), org_id, frozen_ids
-                            )
-                        )
-                        sources.append(Source(store, sconn, snapshot))
-            blob_members = {name: BlobMembership(book, m.id, name) for name in blob_names}
-            for name in blob_names:
-                move.MoveUnit(m, name).transition(move.UnitStatus.COPYING, note="recording keys")
-            print()
-            # book is autocommit and holds none of the snapshot's pinned transactions, so each
-            # per-table write is visible to the dashboard as the copy runs
-            _, copied = run_snapshot(
-                sources,
-                sinks,
-                sink,
-                graph,
-                org_id,
-                blob_members,
-                report_progress=lambda store, rows: units[store].record_copy_progress(rows),
-            )
-            for db in source.databases:
-                for store in db.stores:
-                    rows = sum(copied.get(t, 0) for t in graph.store_tables(store))
-                    unit = move.MoveUnit(m, store)
-                    unit.record_copy_total(rows)
-                    unit.transition(move.UnitStatus.COPIED, note=f"{rows} rows")
-            for name, bm in blob_members.items():
-                _, total = bm.counts()
-                unit = move.MoveUnit(m, name)
-                unit.record_copy_total(total)
-                unit.transition(move.UnitStatus.COPIED, note=f"{total} key(s) recorded")
-            print("\nblob keys recorded in the ledger; streams derive membership from the sink")
-        except BaseException as e:
-            # a failure before any claim releases the lease create() took (a dead live row would
-            # block every future move); one after it holds the lease for the sink scrub
-            m.add_event(repr(e))
-            m.give_up()
-            raise
+            buckets = {name: Bucket(loc["file_path"]) for name, loc in source.blobs.items()}
+            # migrated stores only: one the move doesn't carry never reached the sink, so its
+            # source rows are the only ones there are. run_evict orders children first, so no
+            # per-store gating -- that exists in the worker path only because workers race
+            tables = [t for t in graph.topological_sort() if graph.store_of[t] in units]
+            rows, objects = run_evict(conns, source, graph, org_id, buckets, tables)
+        for store, count in rows.items():
+            move.MoveUnit(m, store).add_event(f"evicted from {source.name}: {count} row(s)")
+        for store, count in objects.items():
+            move.MoveUnit(m, store).add_event(f"evicted from {source.name}: {count} object(s)")
+        for store in units:
+            move.MoveUnit(m, store).transition(move.UnitStatus.EVICTED, note="source evicted")
+        m.transition(move.Phase.FINALIZED, note="every unit evicted; source gone")
+        print(f"\nmove #{m.id} finalized: org {org_id} now lives only in {sink.name}")
 
 
 def cmd_stream(org_id: int, graph: Graph, cells: dict[str, Cell], ledger_dsn: str) -> None:
@@ -313,10 +297,15 @@ def main() -> None:
         help="Register the org's move: move + pending unit rows (takes the one-move lease)",
     )
     p.add_argument("--org-id", type=int, required=True)
-    # snapshot and stream take no cell flags: the route was fixed at registration
+    # these take no cell flags: the route was fixed at registration
     for cmd, doc in [
         ("snapshot", "Snapshot the org's data along its registered move; creates the slots"),
         ("stream", "Stream the org's changes from its slots to the sink until cutover"),
+        (
+            "finalize",
+            "Finish a snapshot-only move: drop its slots + publications, delete the org from"
+            " the source, and finalize",
+        ),
     ]:
         p = sub.add_parser(cmd, help=doc)
         p.add_argument("--org-id", type=int, required=True)
@@ -349,6 +338,8 @@ def main() -> None:
             )
         case "snapshot":
             cmd_snapshot(args.org_id, graph, cells, ledger_dsn)
+        case "finalize":
+            cmd_finalize(args.org_id, graph, cells, ledger_dsn)
         case "stream":
             try:
                 cmd_stream(args.org_id, graph, cells, ledger_dsn)

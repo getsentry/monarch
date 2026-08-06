@@ -8,7 +8,7 @@ BENCH_COMPOSE := $(COMPOSE) -f bench/compose.yaml
 
 .PHONY: up down install databases schema schema-full-rebuild data reset run \
 	traffic evict-sink psql-source psql-standby psql-files psql-sink \
-	psql-ledger mock-schema test bench bench-down bench-schema
+	psql-ledger mock-schema test bench bench-down bench-schema move
 
 up:
 	$(COMPOSE) up -d
@@ -152,3 +152,9 @@ schema-full-rebuild:
 # `make reset`.
 evict-sink:
 	uv run monarch evict --org-id $(ORG) --move-id $(MOVE)
+
+# A move from the CLI, no stream
+move:
+	uv run monarch register --org-id $(ORG)
+	uv run monarch snapshot --org-id $(ORG)
+	uv run monarch finalize --org-id $(ORG)
