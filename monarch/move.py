@@ -62,9 +62,10 @@ class UnitStatus(StrEnum):
 # close it dirty to take the lease back (same edge, the note says which). Post-flip the source
 # copy is removed before the close: cut_over -> evicting (slots/pubs dropped, then the org's
 # source rows + blobs deleted) -> finalized (source gone, org only in the sink -- the true
-# point of no return). The emergency escape cut_over -> reverting -> aborted (routing flips
-# back to the source, sink writes since the flip lost) is offered ONLY from cut_over: once
-# evicting starts the source is going away, so there is nothing to revert to. A destination
+# point of no return). Giving up stays available into `evicting` because that phase deletes
+# nothing on its own: the destructive step is a *unit* reaching status `evicting`, and the gate
+# is that none has. Post-flip that exit is lossy -- sink writes since the flip are lost -- which
+# is what `reverting` names; the demo reuses `aborting` and lets the note say which. A destination
 # may have several sources only when the transition means the same thing from each (aborted:
 # move dead, org on source; slot_dropped: teardown). Gates (writes stopped? every unit caught
 # up? every unit evicted?) are the caller's conditions for *attempting* a transition; these
@@ -73,7 +74,9 @@ MOVE_TRANSITIONS: dict[Phase, set[Phase]] = {
     Phase.ACTIVE: {Phase.DRAINING, Phase.ABORTING, Phase.FAILED, Phase.ABORTED},
     Phase.DRAINING: {Phase.CUT_OVER, Phase.ABORTING, Phase.FAILED, Phase.ABORTED},
     Phase.CUT_OVER: {Phase.EVICTING, Phase.REVERTING, Phase.FAILED},
-    Phase.EVICTING: {Phase.FINALIZED, Phase.FAILED},  # no revert: the source is being deleted
+    # abortable while no unit has begun deleting: teardown dropped the plumbing but nothing
+    # else, so the source is still whole. The first unit to reach `evicting` closes this door.
+    Phase.EVICTING: {Phase.FINALIZED, Phase.ABORTING, Phase.FAILED},
     Phase.REVERTING: {Phase.FAILED, Phase.ABORTED},
     Phase.ABORTING: {Phase.ABORTED},
     Phase.FAILED: {Phase.ABORTED},

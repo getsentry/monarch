@@ -665,8 +665,10 @@ const ACTIONS = [
       note("abort submitted — slots + publications dropped, org never left the source; the feed says which exit it took");
       return true;
     },
-    arm: m => !m || !["active", "draining"].includes(m.phase) ? "nothing abortable"
-      : streaming ? "stop the streams first — a unit is still streaming" : null },
+    arm: m => !m || !["active", "draining", "evicting"].includes(m.phase) ? "nothing abortable"
+      : streaming ? "stop the streams first — a unit is still streaming"
+      : m.phase === "evicting" && !lastUnits.every(u => u.status === "slot_dropped")
+        ? "eviction has begun — the source copy is going away" : null },
   { label: "scrub sink copy",
     show: openMove,
     run: async note => {

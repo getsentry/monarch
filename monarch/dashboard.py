@@ -230,6 +230,8 @@ class Handler(BaseHTTPRequestHandler):
             self._cutover(body)
         elif path == "/finalize":
             self._finalize(body)
+        elif path == "/revert":
+            self._revert(body)
         elif path == "/evict-source":
             # like /snapshot and /stream: move the postgres units to the trigger status
             # (slot_dropped -> evicting) and let each store's worker respond
@@ -450,16 +452,35 @@ class Handler(BaseHTTPRequestHandler):
         row = self.conn.execute(
             "SELECT root_id, source_cell, phase FROM move WHERE id = %s", (move_id,)
         ).fetchone()
-        if row is None or row[2] not in ("active", "draining"):
+        if row is None or row[2] not in ("active", "draining", "evicting"):
             self._respond(
                 409,
                 "application/json",
                 _to_json({"error": "nothing abortable — the phase moved on"}),
             )
             return
+        # from evicting, only while every unit is still slot_dropped: teardown deleted nothing,
+        # so the source is whole and giving up still has something to give up to
+        if row[2] == "evicting":
+            begun = self.conn.execute(
+                "SELECT count(*) FROM move_unit WHERE move_id = %s AND status != 'slot_dropped'",
+                (move_id,),
+            ).fetchone()
+            assert begun is not None
+            if begun[0]:
+                self._respond(
+                    409,
+                    "application/json",
+                    _to_json({"error": "eviction has begun — the source copy is going away"}),
+                )
+                return
         org, source = row[0], self.cells[row[1]]
         m = move.Move(self.conn, move_id)
-        m.add_event("operator requested abort — org never left the source")
+        m.add_event(
+            "operator requested abort after the flip — source kept, sink copy discarded"
+            if row[2] == "evicting"
+            else "operator requested abort — org never left the source"
+        )
         self._tear_down(m, source, org)
         phase = m.give_up()
         if phase:
