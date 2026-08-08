@@ -230,8 +230,6 @@ class Handler(BaseHTTPRequestHandler):
             self._cutover(body)
         elif path == "/finalize":
             self._finalize(body)
-        elif path == "/revert":
-            self._revert(body)
         elif path == "/evict-source":
             # like /snapshot and /stream: move the postgres units to the trigger status
             # (slot_dropped -> evicting) and let each store's worker respond
