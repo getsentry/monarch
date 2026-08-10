@@ -514,6 +514,10 @@ let sourceCell = null;  // the cell a move starts from (fleet.yaml `from`), via 
 async function loadTopology() {
   // structure is config, fetched once; poll() overlays each store's unit status
   try { topo = await (await fetch("/graph")).json(); } catch { return; }
+  // a bucket the move doesn't carry has no unit and no pipe: nothing about it ever changes
+  // during a move, so it's noise on a diagram about one move. dropped here, not in /graph --
+  // the topology stays whole, this is only what the page draws
+  topo.stores = topo.stores.filter(s => !(s.kind === "blob" && s.migrate === false));
   for (const s of topo.stores) if (s.kind === "blob") blobStores.add(s.name);
   $("spine").innerHTML = `<div class="spinecard">` +
     `<div class="spinelab">fixed for the move — every cross-store edge binds here</div>` +
@@ -528,7 +532,9 @@ async function loadTopology() {
       ${s.tables ? `<div class="tbls">${s.tables.length} table${s.tables.length === 1 ? "" : "s"}</div>` : ""}
     </div>`;
   $("stores").innerHTML = topo.stores.filter(s => s.kind === "postgres").map(node).join("");
-  $("buckets").innerHTML = topo.stores.filter(s => s.kind === "blob").map(node).join("");
+  const buckets = topo.stores.filter(s => s.kind === "blob");
+  $("buckets").innerHTML = buckets.map(node).join("");
+  $("buckets").style.display = buckets.length ? "" : "none";  // no empty row's top margin
   requestAnimationFrame(drawEdges);
 }
 
