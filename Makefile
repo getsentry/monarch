@@ -83,14 +83,15 @@ data:
 
 # Reset the demo to a blank slate: drop every database and both buckets (rebuild with
 # `make mock-schema data`). Slots on the standby are dropped first: a database can't be
-# dropped while a logical slot targets it.
+# dropped while a logical slot targets it. FORCE clears leftover sessions; stop `make run`
+# first anyway, a live worker just reconnects.
 reset:
 	-$(COMPOSE) exec -T source-standby psql -U monarch -d postgres -c "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name LIKE 'monarch_%'"
-	$(SOURCE_PSQL) -d postgres -c "DROP DATABASE IF EXISTS source"
-	$(SOURCE_PSQL) -d postgres -c "DROP DATABASE IF EXISTS source_files"
-	$(SOURCE_PSQL) -d postgres -c "DROP DATABASE IF EXISTS source_metrics"
-	$(PSQL) -d postgres -c "DROP DATABASE IF EXISTS sink"
-	$(PSQL) -d postgres -c "DROP DATABASE IF EXISTS monarch_ledger"
+	$(SOURCE_PSQL) -d postgres -c "DROP DATABASE IF EXISTS source WITH (FORCE)"
+	$(SOURCE_PSQL) -d postgres -c "DROP DATABASE IF EXISTS source_files WITH (FORCE)"
+	$(SOURCE_PSQL) -d postgres -c "DROP DATABASE IF EXISTS source_metrics WITH (FORCE)"
+	$(PSQL) -d postgres -c "DROP DATABASE IF EXISTS sink WITH (FORCE)"
+	$(PSQL) -d postgres -c "DROP DATABASE IF EXISTS monarch_ledger WITH (FORCE)"
 	rm -rf mock_storages/buckets
 
 psql-source:
