@@ -24,8 +24,37 @@ from psycopg import Connection, errors
 from psycopg.rows import dict_row
 
 from . import move, slot
-from .config import BlobStore, Cell, Graph, PostgresStore, list_units
+from .config import BlobStore, Cell, Graph, PostgresStore, connect, list_units
 from .utils import trust_sql
+
+
+class Ledger:
+    """The dashboard's ledger connection, redialled whenever the last one died.
+
+    The dashboard outlives the database it reads: `make reset-sink` destroys the VM the ledger
+    lives on, and a Postgres restart or an idle-connection kill does the same thing more cheaply.
+    Holding one connection for the process's life turned that into a wedge -- psycopg has no
+    reconnect of its own, and http.server catches per-request exceptions, so the process stayed
+    up and healthy to Kubernetes while every later poll died in `cursor()` with `the connection
+    is closed`, until someone rolled the pod by hand. Holding the DSN instead costs one redial.
+
+    Nothing here retries the failed request: psycopg marks a connection closed once a statement
+    on it fails, so the request that discovers the death is the only casualty and the page's next
+    poll (a second or two later) lands on a fresh connection.
+
+    The workers need none of this, though worker.py holds a connection just as long: their
+    exception escapes `run_worker`, the process exits, and Kubernetes restarts them into a new
+    connection. `serve_forever` is what turned the same failure from a restart into a wedge.
+    """
+
+    def __init__(self, dsn: str) -> None:
+        self._dsn = dsn
+        self._conn: Connection | None = None
+
+    def conn(self) -> Connection:
+        if self._conn is None or self._conn.closed:
+            self._conn = connect(self._dsn)
+        return self._conn
 
 
 def build_scope_tree(graph: Graph, store: str) -> list[dict]:
@@ -197,7 +226,7 @@ def _to_json(payload: dict) -> bytes:
 class Handler(BaseHTTPRequestHandler):
     def __init__(
         self,
-        conn: Connection,
+        ledger: Ledger,
         topology: dict,
         graph: Graph,
         cells: dict[str, Cell],
@@ -205,12 +234,19 @@ class Handler(BaseHTTPRequestHandler):
         *args,
         **kwargs,
     ) -> None:
-        self.conn = conn
+        self.ledger = ledger
         self.topology = topology
         self.graph = graph
         self.cells = cells
         self.source_cell = source_cell
         super().__init__(*args, **kwargs)
+
+    @property
+    def conn(self) -> Connection:
+        """The ledger connection for this request. A property, not an attribute, so the route
+        bodies below read the same `self.conn` they always did while a reconnect stays invisible
+        to them."""
+        return self.ledger.conn()
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
@@ -535,15 +571,17 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def run_dashboard(
-    conn: Connection,
+    ledger_dsn: str,
     port: int,
     graph: Graph,
     cells: dict[str, Cell],
     source_cell: str,
     host: str = "127.0.0.1",
 ) -> None:
-    """Single-threaded on purpose: one shared ledger connection, one polling client."""
+    """Single-threaded on purpose: one shared ledger connection, one polling client. The DSN
+    rather than the connection, so a ledger that restarts under us is redialled (see Ledger)."""
     topology = describe_topology(graph, cells)
-    server = HTTPServer((host, port), partial(Handler, conn, topology, graph, cells, source_cell))
+    ledger = Ledger(ledger_dsn)
+    server = HTTPServer((host, port), partial(Handler, ledger, topology, graph, cells, source_cell))
     print(f"dashboard: http://{host}:{port}")
     server.serve_forever()

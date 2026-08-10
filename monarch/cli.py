@@ -357,18 +357,19 @@ def main() -> None:
         case "evict":
             cmd_evict(args.org_id, graph, cells, ledger_dsn, args.move_id)
         case "dashboard":
-            with connect(ledger_dsn) as conn:
-                try:
-                    dashboard.run_dashboard(
-                        conn,
-                        args.port,
-                        graph,
-                        cells,
-                        config.from_cell,
-                        args.host,
-                    )
-                except KeyboardInterrupt:
-                    pass
+            # the DSN, not a connection: the dashboard dials the ledger itself and redials it if
+            # it dies (the ledger's VM gets reset under a running dashboard)
+            try:
+                dashboard.run_dashboard(
+                    ledger_dsn,
+                    args.port,
+                    graph,
+                    cells,
+                    config.from_cell,
+                    args.host,
+                )
+            except KeyboardInterrupt:
+                pass
 
 
 if __name__ == "__main__":
