@@ -4,8 +4,6 @@
 This script is relevant for a self-hosted demo where there is no control silo, and no
 "control never moves" story to honor: the unmanaged tables can be bulk-copied whole
 from source to sink.
-
-Not everything outside the org graph is global, though -- see SKIP_TABLES.
 """
 
 from __future__ import annotations
@@ -14,15 +12,6 @@ import psycopg
 
 from monarch.config import CONFIG, FLEET, Cell, Graph, connect, load_config
 from monarch.utils import trust_sql
-
-# Outside the org graph but not global: org data the manifest excludes as unscopable. Copied,
-# their rows point at parents the snapshot adopts -- and eviction walks the manifest, so it
-# can't delete them back out and the sink scrub fails on the foreign key. Left empty instead.
-SKIP_TABLES = {
-    "workflow_engine_workflowactiongroupstatus",
-    "workflow_engine_dataconditiongroupaction",
-    "sentry_notificationmessage",
-}
 
 
 def public_tables(conn: psycopg.Connection) -> set[str]:
@@ -72,7 +61,7 @@ def copy_cell(source: Cell, sink: Cell, graph: Graph) -> None:
         for database in source.databases:
             with connect(database.primary_dsn) as source_conn:
                 unmanaged = unmanaged_tables(public_tables(source_conn), graph)
-                to_copy = sorted((unmanaged & sink_present) - SKIP_TABLES)
+                to_copy = sorted(unmanaged & sink_present)
                 absent = sorted(unmanaged - sink_present)
                 print(f"  {database.dbname}: {len(to_copy)} unmanaged tables to copy", flush=True)
                 for table in to_copy:
@@ -82,8 +71,6 @@ def copy_cell(source: Cell, sink: Cell, graph: Graph) -> None:
                     print(f"    {table}: {rows} rows", flush=True)
                 if absent:
                     print(f"    absent on sink, skipped: {', '.join(absent)}", flush=True)
-                if skipped := sorted(unmanaged & SKIP_TABLES):
-                    print(f"    excluded org data, left empty: {', '.join(skipped)}", flush=True)
         sink_conn.execute("SET session_replication_role = DEFAULT")
     print(f"copied {total_rows} rows across {total_tables} tables", flush=True)
 

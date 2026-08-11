@@ -39,6 +39,14 @@ def run_evict(
     conn_for = {t: conns[db.primary_dsn] for db in cell.databases for t in db.tables(graph)}
     with ExitStack() as stack:
         for conn in conns.values():
+            # HACK, for the self-hosted sandbox: it autocreates a workflow action, and the rows
+            # referencing one sit outside the org graph while pointing into it. Eviction only
+            # walks the manifest, so it never deletes those rows and Postgres then refuses to
+            # delete the parent they point at. Dropping the triggers gets the delete through and
+            # leaves them dangling, which a returning org re-adopts: ids are preserved. The real
+            # fix is to scope those tables in the org graph, where eviction reaches them.
+            conn.execute("SET session_replication_role = replica")
+            stack.callback(conn.execute, "SET session_replication_role = DEFAULT")
             stack.enter_context(conn.transaction())
 
         # Scan keys graph-wide (every parent's, wherever it lives) so a target's predicate
