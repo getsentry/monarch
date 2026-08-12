@@ -197,7 +197,7 @@ def read_orgs(graph: Graph, cells: dict[str, Cell], source_cell: str) -> dict:
     orgs = []
     for cell in cells.values():
         try:
-            with psycopg.connect(cell.dsn_for(store), autocommit=True) as conn:
+            with connect(cell.dsn_for(store)) as conn:
                 rows = conn.execute(
                     trust_sql(f'SELECT {root_key}, name FROM "{graph.root}" ORDER BY {root_key}')
                 ).fetchall()

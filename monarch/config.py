@@ -11,7 +11,7 @@ from typing import Literal, cast
 
 import psycopg
 import yaml
-from psycopg.conninfo import conninfo_to_dict
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 # Config file paths, env-overridable.
 CONFIG = os.environ.get("MONARCH_MANIFEST", "manifest.generated.yaml")
@@ -20,10 +20,29 @@ FLEET = os.environ.get("MONARCH_FLEET", "fleet.yaml")
 Eviction = Literal["delete", "keep"]
 
 
+# Handle a peer that vanishes without closing -- the cell VM destroyed under us, a partitioned node --
+# leaves TCP with nothing to report: the socket stays ESTABLISHED and a read on it blocks forever.
+#
+# Safe for the movers' long snapshot and streaming as keepalive probes are answered by the peer's
+# kernel even if Postgres is busy.
+TIMEOUTS = {
+    "connect_timeout": 5,  # seconds
+    "keepalives_idle": 30,  # seconds of silence before the kernel starts probing
+    "tcp_user_timeout": 60_000,  # in milliseconds, give up after 60s if no answer
+}
+
+
+def with_timeouts(dsn: str) -> str:
+    """`dsn` with the TIMEOUTS defaults filled in for whatever it doesn't already set, so a
+    fleet.yaml that has deliberately tuned one of these keeps its own value."""
+    given = conninfo_to_dict(dsn)
+    return make_conninfo(dsn, **{k: v for k, v in TIMEOUTS.items() if k not in given})
+
+
 def connect(dsn: str) -> psycopg.Connection:
     """An autocommit connection: the ledger and cell reads/writes here manage their own
     transactions explicitly (move.transition, snapshot's pinned reads)."""
-    return psycopg.connect(dsn, autocommit=True)
+    return psycopg.connect(with_timeouts(dsn), autocommit=True)
 
 
 # `migrate` false means no mover unit: no slot, no publication, no stream, no eviction. On a bucket

@@ -17,7 +17,7 @@ import psycopg2.extras
 from psycopg import Connection
 from psycopg2.extras import LogicalReplicationConnection
 
-from .config import Cell, Graph, connect
+from .config import Cell, Graph, connect, with_timeouts
 from .utils import trust_sql
 
 
@@ -159,7 +159,9 @@ def drop_publication(conn: Connection, name: str) -> None:
 
 
 def connect_replication(dsn: str) -> LogicalReplicationConnection:
-    return psycopg2.connect(dsn, connection_factory=LogicalReplicationConnection)
+    # psycopg2 hands the DSN to libpq just the same, and this is the longest-lived connection here:
+    # a stream that blackholes without the deadlines stalls the mover with nothing raised anywhere.
+    return psycopg2.connect(with_timeouts(dsn), connection_factory=LogicalReplicationConnection)
 
 
 @contextmanager
@@ -176,7 +178,7 @@ def nudge_running_xacts(primary_dsns: list[str]) -> Iterator[None]:
 
     def nudge() -> None:
         with ExitStack() as stack:
-            conns = [stack.enter_context(psycopg.connect(d, autocommit=True)) for d in primary_dsns]
+            conns = [stack.enter_context(connect(d)) for d in primary_dsns]
             while not stop.is_set():
                 for conn in conns:
                     conn.execute("SELECT pg_log_standby_snapshot()")
