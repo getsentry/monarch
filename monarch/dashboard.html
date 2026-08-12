@@ -12,6 +12,7 @@
     --muted: #898781; --grid: #e1e0d9; --border: rgba(11, 11, 11, 0.10);
     --blue: #2a78d6; --yellow: #eda100; --orange: #eb6834;
     --good: #006300; --bad: #d03b3b; --edge: #b6b4ac; --aqua: #1baf7a;
+    --violet: #4a3aa7; --magenta: #e87ba4;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -19,6 +20,7 @@
       --muted: #898781; --grid: #2c2c2a; --border: rgba(255, 255, 255, 0.10);
       --blue: #3987e5; --yellow: #c98500; --orange: #d95926;
       --good: #0ca30c; --bad: #d03b3b; --edge: #55534d; --aqua: #199e70;
+      --violet: #9085e9; --magenta: #d55181;
     }
   }
   * { box-sizing: border-box; }
@@ -75,6 +77,10 @@
   /* scope tree: the store's tables nested by what scopes them, collapsed until clicked open */
   .tree { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
           max-height: 360px; overflow: auto; }
+  /* the nesting is what scopes what; the sequence is a different graph -- one edge per table
+     here, every ref there -- so the order gets said rather than left to be inferred */
+  .treenote { font-size: 11px; color: var(--muted); margin: 8px 0 5px;
+              padding-top: 7px; border-top: 1px solid var(--grid); }
   .tree summary { cursor: pointer; list-style: none; padding: 1px 0; }
   .tree summary::-webkit-details-marker { display: none; }
   .tree summary::before { content: "▸"; display: inline-block; width: 11px; color: var(--muted); }
@@ -86,17 +92,25 @@
   /* ---- topology (structure from config, status tint from the ledger) ---- */
   #topo { margin-bottom: 16px; }
   .graph { position: relative; }
+  /* layered between the spine and the stores: an edge ends at the chip it binds to, which sits
+     inside the spine card, so the line has to paint over that card's padding to reach it. Store
+     cards stay above, so nothing is drawn across their faces */
   .graph svg { position: absolute; inset: 0; width: 100%; height: 100%;
-               pointer-events: none; }
+               pointer-events: none; z-index: 1; }
   /* direction is static lineage (no arrowheads, matching the doc); motion = data flowing */
   #edges path.live { stroke-dasharray: 6 5; animation: flow 1.1s linear infinite; }
   @keyframes flow { to { stroke-dashoffset: -11; } }
   /* edge labels hide until a hover singles their edge out -- they pile up otherwise */
-  #edges path { transition: opacity 0.15s; }
-  #edges path.hi { opacity: 1; stroke-width: 2.2; }
+  /* quiet at rest: every edge at full strength reads as noise once there are more than a few.
+     Hovering a node brings its own back to full */
+  #edges path { stroke: var(--edge); opacity: 0.45; transition: opacity 0.15s; }
+  /* every edge is grey at rest and aqua on hover, cross-db or not: colouring the cross case
+     tinted almost the whole diagram, since most stores do cross. Which kind an edge is now rides
+     entirely on its label -- "project_id · cross-db" against "same WAL" */
+  #edges path.hi { stroke: var(--aqua); opacity: 1; stroke-width: 2.2; }
   #edges path.dim { opacity: 0.12; }
   #edges text.elabel { font-size: 10.5px; fill: var(--muted); opacity: 0;
-                       transition: opacity 0.15s; }
+                       text-anchor: middle; transition: opacity 0.15s; }
   #edges text.elabel.hi { opacity: 1; }
   .spine { position: relative; display: flex; justify-content: center; margin-bottom: 44px; }
   .spinecard { background: var(--surface); border: 1.5px solid var(--grid);
@@ -107,14 +121,17 @@
   .minis { display: flex; gap: 12px; justify-content: center; }
   .mini { border: 1px solid var(--grid); border-radius: 6px; padding: 4px 11px;
           font-size: 12.5px; font-weight: 600; }
-  .storegrid { position: relative; display: grid;
+  .storegrid { position: relative; z-index: 2; display: grid;
                grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
   .storegrid.buckets { margin-top: 44px; }
   .snode { background: var(--surface); border: 1.5px solid var(--grid);
            border-radius: 8px; padding: 8px 11px; }
   .snode.bucket { border-style: dashed; }
   .snode .nm { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
-  .snode b { font-size: 13px; }
+  /* a long store name gets the whole line: the status moved down to the kind row, so nothing
+     competes with it for width, and it ellipsizes rather than escaping the card */
+  .snode b { font-size: 13px; min-width: 0; overflow: hidden;
+             text-overflow: ellipsis; white-space: nowrap; }
   .snode .st { font-size: 9.5px; font-weight: 700; letter-spacing: 0.05em;
                text-transform: uppercase; color: var(--muted); }
   .snode .st.run { color: var(--blue); }
@@ -122,6 +139,12 @@
                  text-transform: uppercase; color: var(--muted); margin-top: 1px; }
   .snode .tbls { font-size: 11.5px; color: var(--muted); margin-top: 4px;
                  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* the table count doubles as the affordance for this store's scope tree */
+  .snode .walk { display: inline-block; border: 1px solid var(--border); border-radius: 999px;
+                 padding: 1px 8px; background: color-mix(in srgb, var(--grid) 40%, transparent);
+                 transition: background 0.15s, border-color 0.15s, color 0.15s; }
+  .snode:hover .walk { border-color: var(--edge); color: var(--ink-2);
+                       background: color-mix(in srgb, var(--grid) 90%, transparent); }
   /* a store's detail is clicked, not hovered -- it holds an expandable tree, so it has to stay */
   .snode { cursor: pointer; }
   .snode:hover { border-color: var(--edge);
@@ -200,9 +223,15 @@
   .feed li { display: flex; gap: 10px; padding: 3px 0; border-bottom: 1px solid var(--grid); }
   .feed li:last-child { border-bottom: 0; }
   .feed .t { color: var(--muted); font-variant-numeric: tabular-nums; flex: none; }
-  .feed .chip { flex: none; min-width: 120px; font-size: 10.5px; font-weight: 600;
+  /* fixed, not min-width: a long unit name grew the chip and pushed that one line's text out of
+     the column. Wraps inside its own width instead, so the descriptions stay flush */
+  .feed .chip { flex: none; width: 146px; font-size: 10.5px; font-weight: 600;
                 color: var(--ink-2); text-transform: uppercase; letter-spacing: 0.04em;
-                padding-top: 2px; }
+                padding-top: 2px; overflow-wrap: anywhere; }
+  /* one hue per store, carried on --hue and spaced by the golden angle so any number of them stay
+     apart. The same hue tints a node in the graph and that store's lines in the feed, which is
+     what ties the two together. Lightness is set here, so both themes stay legible */
+  .tinted, .feed .chip.tinted { color: var(--tint); }
   .feed .x { min-width: 0; }
 </style>
 </head>
@@ -230,11 +259,11 @@
     </div>
     <aside class="side">
       <article class="card" id="snap">
-        <h2>snapshot</h2>
+        <h2>snapshot<span class="help" data-help="snapshot">?</span></h2>
         <div id="snaprows"></div>
       </article>
       <article class="card" id="streamcard">
-        <h2>stream</h2>
+        <h2>stream<span class="help" data-help="stream">?</span></h2>
         <div id="streamrows"></div>
       </article>
       <article class="card" id="draincard">
@@ -348,10 +377,9 @@ function snapLine(u) {
   if (u.status === "pending") return "waiting";
   if (u.status === "copying")
     // the mover writes copy_rows_done per table, so this counts up instead of reading as a stall.
-    // the estimate only sets scale, and only until the first table lands -- the hover holds both
+    // the row states only what has actually been counted; the planner's guess is in the hover
     return "copying…"
-      + (u.copy_rows_done != null ? ` ${fmt(u.copy_rows_done)} ${noun}`
-         : u.copy_rows_estimate != null ? ` ~${fmt(u.copy_rows_estimate)} ${noun} expected` : "")
+      + (u.copy_rows_done != null ? ` ${fmt(u.copy_rows_done)} ${noun}` : "")
       + (t.copying ? ` · started ${clock(t.copying)}` : "");
   let s = u.copy_rows_total != null ? `✓ ${fmt(u.copy_rows_total)} ${noun}` : "✓ copied";
   if (t.copying && t.copied) s += ` · ${fmtDur(new Date(t.copied) - new Date(t.copying))}`;
@@ -376,17 +404,14 @@ function streamRow(u) {
   if (u.status === "evicting") return { text: "evicting source…", frac: 0, cls: "" };
   if (u.status === "slot_dropped") return { text: "pipe closed ✓", frac: 0, cls: "hit" };
   // copied means either snapshot-done or stream-stopped; a reported sink position tells them
-  // apart. keep the numbers a stopped unit earned -- whether it was caught up when it stopped is
-  // the cut-over question, and it stays true after the stream ends
+  // apart. keep the numbers a stopped unit earned
   if (u.status !== "streaming") {
     if (u.applied == null) return { text: "queued", frac: 0, cls: "" };
     if (blobStores.has(u.unit))
       return { text: `${fmt(+u.applied)}/${fmt(+u.head)} keys · stopped`, frac: 0, cls: "" };
     const stoppedAt = lagBytes(u);
-    if (stoppedAt === 0)
-      return { text: `${fmt(+u.applied_changes)} applied · caught up ✓`, frac: 0, cls: "hit" };
     return { text: `${fmt(+u.applied_changes)} applied · stopped`
-      + (stoppedAt != null ? ` ${fmtBytes(stoppedAt)} behind` : ""), frac: 0, cls: "" };
+      + (stoppedAt ? ` ${fmtBytes(stoppedAt)} behind` : ""), frac: 0, cls: "" };
   }
   // blob units heartbeat key counts, not LSNs
   if (blobStores.has(u.unit)) {
@@ -438,14 +463,31 @@ function renderStream(units) {
 
 // drain card: one row + readiness bar per streaming postgres unit (blobs don't drain WAL).
 // empty while catching up, filling teal→green as it goes quiet toward the 30-second drained mark
+// rebuilt only when the set of draining units changes, then updated in place: replacing the
+// markup every poll handed the bars new elements each second, so `transition: width` never had
+// an old value to move from and the fill ratcheted instead of gliding
+let drainBuiltFor = null;
 function renderDrain(units) {
-  const rows = units.map(u => {
-    const q = quietClock(u);
-    if (!q) return "";
-    return `<div class="kv"><span>${u.unit}</span><span class="${q.done ? "hit" : ""}">${q.text}</span></div>`
-      + `<div class="lagbar quietbar${q.done || q.neutral ? "" : " pending"}"><div class="${q.done ? "done" : ""}" style="width:${Math.min(q.frac, 1) * 100}%"></div></div>`;
-  }).join("");
-  $("drainrows").innerHTML = rows || `<div class="kv"><span>—</span><span>no active streams</span></div>`;
+  const live = units.map(u => [u, quietClock(u)]).filter(([, q]) => q);
+  const key = live.map(([u]) => u.unit).join(",");
+  if (key !== drainBuiltFor) {
+    drainBuiltFor = key;
+    $("drainrows").innerHTML = live.length
+      ? live.map(([u]) =>
+          `<div class="kv"><span>${u.unit}</span><span id="dq-${u.unit}"></span></div>`
+          + `<div class="lagbar quietbar" id="dbar-${u.unit}"><div id="dfill-${u.unit}"></div></div>`
+        ).join("")
+      : `<div class="kv"><span>—</span><span>no active streams</span></div>`;
+  }
+  for (const [u, q] of live) {
+    const text = $(`dq-${u.unit}`);
+    text.textContent = q.text;
+    text.className = q.done ? "hit" : "";
+    $(`dbar-${u.unit}`).className = "lagbar quietbar" + (q.done || q.neutral ? "" : " pending");
+    const fill = $(`dfill-${u.unit}`);
+    fill.style.width = Math.min(q.frac, 1) * 100 + "%";
+    fill.className = q.done ? "done" : "";
+  }
 }
 
 function appendEvents(events) {
@@ -473,6 +515,11 @@ function appendEvents(events) {
     t.textContent = new Date(e.at).toLocaleTimeString("en-GB");
     const chip = document.createElement("span"); chip.className = "chip";
     chip.textContent = e.unit ?? "move";
+    // org-level lines stay neutral: `move` is not a store, so it gets no store's colour
+    if (tintOf[e.unit]) {
+      chip.classList.add("tinted");
+      chip.style.setProperty("--tint", `var(${tintOf[e.unit]})`);
+    }
     const x = document.createElement("span"); x.className = "x";
     x.textContent = e.unit ? `-> ${message}` : message;
     li.append(t, chip, x);
@@ -510,6 +557,12 @@ async function poll() {
 }
 
 let topo = null;
+// the palette is hand-picked and already carries a value per theme, so nothing here has to
+// reason about lightness. Assigned in render order, once the topology is known
+// order matters: it maps to render order, so two warm tones next to each other in this list end
+// up on neighbouring cards. Orange sits away from magenta for that reason
+const PALETTE = ["--blue", "--orange", "--aqua", "--violet", "--magenta", "--yellow"];
+const tintOf = {};
 let sourceCell = null;  // the cell a move starts from (fleet.yaml `from`), via /orgs
 async function loadTopology() {
   // structure is config, fetched once; poll() overlays each store's unit status
@@ -518,6 +571,23 @@ async function loadTopology() {
   // during a move, so it's noise on a diagram about one move. dropped here, not in /graph --
   // the topology stays whole, this is only what the page draws
   topo.stores = topo.stores.filter(s => !(s.kind === "blob" && s.migrate === false));
+  // the primary store keeps its place at the front -- the manifest declares it first, and it is
+  // the one holding the spine. After that, most-connected first and unconnected last: the grid
+  // wraps, and a store below the first row has its edges hidden behind the row above, so the ones
+  // with edges belong up top. Stable, so manifest order survives within a tie
+  const primary = topo.stores[0]?.name;
+  topo.stores.sort((a, b) => {
+    if (a.name === primary) return -1;
+    if (b.name === primary) return 1;
+    return b.binds.length - a.binds.length;
+  });
+  // a store the move leaves out gets no colour: it has no unit, never appears in the feed, and
+  // staying neutral is the point being made about it
+  let next = 0;
+  for (const s of topo.stores) {
+    if (s.migrate === false) continue;
+    tintOf[s.name] = PALETTE[next++ % PALETTE.length];
+  }
   for (const s of topo.stores) if (s.kind === "blob") blobStores.add(s.name);
   $("spine").innerHTML = `<div class="spinecard">` +
     `<div class="spinelab">fixed for the move — every cross-store edge binds here</div>` +
@@ -525,11 +595,12 @@ async function loadTopology() {
       `<div class="mini" id="spine-${s.table}">${s.frozen ? "📌 " : ""}${s.table}</div>`).join("")}</div></div>`;
   const node = s => `
     <div class="snode ${s.kind === "blob" ? "bucket" : ""}" id="node-${s.name}">
-      <div class="nm"><b>${s.name}</b>
-        <span class="st" id="storest-${s.name}"></span></div>
-      <div class="kind">${s.kind === "blob" ? "bucket" : s.kind}</div>
-      ${s.migrate === false ? `<div class="tbls">not moved</div>` : ""}
-      ${s.tables ? `<div class="tbls">${s.tables.length} table${s.tables.length === 1 ? "" : "s"}</div>` : ""}
+      <div class="nm"><b class="${tintOf[s.name] ? "tinted" : ""}"
+        style="--tint: var(${tintOf[s.name] ?? "--ink"})">${s.name}</b></div>
+      <div class="kind">${s.kind === "blob" ? "bucket" : s.kind}<span
+        class="st" id="storest-${s.name}"></span></div>
+      ${s.migrate === false ? `<div class="tbls"><span class="walk">not moved</span></div>` : ""}
+      ${s.tables ? `<div class="tbls"><span class="walk">${s.tables.length} table${s.tables.length === 1 ? "" : "s"}</span></div>` : ""}
     </div>`;
   $("stores").innerHTML = topo.stores.filter(s => s.kind === "postgres").map(node).join("");
   const buckets = topo.stores.filter(s => s.kind === "blob");
@@ -563,11 +634,14 @@ function drawEdges() {
       const liveKey = s.kind === "blob" ? (s.migrate ? b.to : "") : s.name;
       const touch = `${from.id} ${to.id}`;
       paths += `<path d="M ${a.x} ${a.y} C ${a.x} ${my}, ${z.x} ${my}, ${z.x} ${z.y}"
-        fill="none" stroke="var(${b.cross ? "--aqua" : "--edge"})" stroke-width="1.5"
+        fill="none" stroke-width="1.5"
         data-live-key="${liveKey}" data-touch="${touch}"
         ${s.kind === "blob" ? 'stroke-dasharray="4 3"' : ""}/>`;
+      // on the parent it binds to, which is where the edges converge anyway, and far enough below
+      // the spine card that the glyph tops clear its border. Stores sharing a parent stack here,
+      // but they stack identical text -- the label names the binding column, not the store
       paths += `<text class="elabel" data-touch="${touch}"
-        x="${a.x + (z.x - a.x) * 0.3 + 7}" y="${a.y + (z.y - a.y) * 0.3 + 3}">${b.label}</text>`;
+        x="${a.x}" y="${a.y + 28}">${b.label}</text>`;
     }
   }
   svg.innerHTML = paths;
@@ -810,7 +884,10 @@ function storeTip(s) {
       + `<ul><li>membership: org-scoped rows point <i>at</i> these tables, so it has to come in`
       + ` reverse</li><li>identity: a content checksum shared across orgs, so the sink may already`
       + ` hold the same bytes under a different id</li></ul>`;
-  return lines + `<div class="tree">${s.scope_tree.map(treeNode).join("")}</div>`;
+  return lines
+    + `<div class="treenote">copy order: breadth-first, each table waits for every table`
+    + ` it references</div>`
+    + `<div class="tree">${s.scope_tree.map(treeNode).join("")}</div>`;
 }
 
 // the snapshot row stays terse, so its numbers ride here. one per line, and the estimate is its
@@ -841,6 +918,14 @@ function spineTip(name) {
 // card explainers, same #tip keyed by data-help. drain readiness earns one: its bar measures
 // silence, not progress
 const HELP = {
+  snapshot: `<b>snapshot</b> — rows copied into the sink.`
+    + `<br>Each store copies in one transaction pinned to its slot's snapshot: atomic and`
+    + ` ordered inside, parallel and unshared across.`
+    + `<br>Counted by the mover as it copies; the source is never queried for progress.`,
+  stream: `<b>stream</b> — changes applied for this org, and how far behind each stream is.`
+    + `<br>Serial within a stream, in source commit order, and acked only once applied.`
+    + `<br>Other orgs' commits arrive too and are filtered on the way in — a store at 0 applied`
+    + ` is reading traffic and filtering all of it, not sitting idle.`,
   drain: `<b>drain readiness</b> — has writing to this store stopped?`
     + `<br>Caught up, then quiet for <b>30s</b>: we infer upstream writers have stopped.`,
 };
@@ -891,7 +976,7 @@ function tintStores(m, units) {
     if (status === "copying" || (status === "streaming" && fresh(byUnit[s.name]))) flowing.add(s.name);
     const el = $(`storest-${s.name}`);
     if (!el) continue;
-    el.textContent = status.replace("_", " ");
+    el.textContent = ` · ${status.replace("_", " ")}`;
     el.className = "st" + (flowing.has(s.name) ? " run" : "");
   }
   for (const p of document.querySelectorAll("#edges path"))
@@ -909,11 +994,12 @@ async function loadOrgs() {
     + `${o.id} · ${o.name} — in ${o.cell}</option>`).join("");
 }
 
-loadTopology();
 if (pinned) {
-  poll();
-  setInterval(poll, 1000);
+  // topology first: the feed tints its chips from it, and the journal's existing events are
+  // appended once, so a chip rendered before the hues exist would never get coloured
+  loadTopology().then(() => { poll(); setInterval(poll, 1000); });
 } else {
+  loadTopology();
   loadOrgs();
   pollMoves();
   setInterval(pollMoves, 2000);

@@ -35,30 +35,54 @@
              color: var(--muted); font-size: 13px; }
   #stepper li.done::before { content: "✓ "; color: var(--good); }
   #stepper li.now { color: var(--ink); font-weight: 600; }
-  .pill { border: 1px solid var(--border); border-radius: 999px; padding: 3px 12px;
-          font-size: 13px; font-weight: 600; background: var(--surface); }
-  .pill.run { color: var(--blue); }
-  .pill.ok { color: var(--good); }
+  /* the page's only control: solid while it is your turn, quiet while the move is working */
+  .cta { border: 1px solid var(--blue); border-radius: 999px; padding: 4px 14px;
+         font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer;
+         background: var(--blue); color: #fff;
+         transition: background 0.15s, color 0.15s, border-color 0.15s; }
+  .cta:hover { box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 25%, transparent); }
+  .cta:disabled { background: none; color: var(--muted); border-color: var(--border);
+                  font-weight: 400; cursor: default; box-shadow: none; }
+  /* a ring breathing outward while it is your turn -- the page does nothing until this is
+     pressed, so it has to say so without a caption. Stops once the pointer finds it, and while
+     the move is working there is nothing to press, so a disabled button never pulses. */
+  .cta:not(:disabled) { animation: nudge 2.6s ease-out infinite; }
+  .cta:not(:disabled):hover { animation: none; }
+  @keyframes nudge {
+    0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--blue) 45%, transparent); }
+    70%  { box-shadow: 0 0 0 8px color-mix(in srgb, var(--blue) 0%, transparent); }
+    100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--blue) 0%, transparent); }
+  }
+  @media (prefers-reduced-motion: reduce) { .cta { animation: none !important; } }
   #banner { color: var(--ink-2); margin: 6px 0 14px; min-height: 1.4em; }
 
-  .layout { display: grid; grid-template-columns: 1fr 250px; gap: 16px; align-items: start; }
+  .layout { display: grid; grid-template-columns: 1fr 290px; gap: 16px; align-items: start; }
   .main { min-width: 0; }
   .card { background: var(--surface); border: 1px solid var(--border);
           border-radius: 10px; padding: 14px 16px; }
   .card h2 { font-size: 12px; font-weight: 600; letter-spacing: 0.06em;
              text-transform: uppercase; color: var(--muted); margin: 0 0 10px; }
+  .card h2 .help { display: inline-flex; align-items: center; justify-content: center;
+                   width: 13px; height: 13px; margin-left: 6px; vertical-align: 1px;
+                   border: 1px solid var(--border); border-radius: 999px;
+                   font-size: 9px; color: var(--muted); cursor: help; }
 
   /* ---- the store graph ---- */
   .graph { position: relative; padding: 6px 0 2px; }
+  /* layered between the spine row and the store row: an edge ends at the chip it binds to, which
+     sits inside the static card, so the line has to paint over that card's padding to reach it.
+     Store cards stay above, so nothing is drawn across their faces */
   .graph svg { position: absolute; inset: 0; width: 100%; height: 100%;
-               pointer-events: none; }
-  .grow { position: relative; display: flex; justify-content: center; gap: 12px;
-          margin-bottom: 52px; z-index: 1; align-items: stretch; }
-  .grow:last-child { margin-bottom: 4px; }
+               pointer-events: none; z-index: 2; }
+  /* wraps rather than overflowing if the column ever gets narrower than the row -- edges are
+     drawn from measured positions, so they follow */
+  .grow { position: relative; display: flex; justify-content: center; gap: 10px;
+          flex-wrap: wrap; margin-bottom: 52px; z-index: 1; align-items: stretch; }
+  .grow:last-child { margin-bottom: 4px; z-index: 3; }
 
-  .spinecard { background: var(--surface); border: 1.5px solid var(--grid);
+  .staticcard { background: var(--surface); border: 1.5px solid var(--grid);
                border-radius: 10px; padding: 8px 16px 10px; }
-  .spinelab { font-size: 10px; font-weight: 700; letter-spacing: 0.07em;
+  .staticlab { font-size: 10px; font-weight: 700; letter-spacing: 0.07em;
               text-transform: uppercase; color: var(--muted); text-align: center;
               margin-bottom: 7px; }
   .minis { display: flex; gap: 12px; justify-content: center; }
@@ -67,18 +91,28 @@
   .mini b { font-weight: 600; }
   .mini .mv { color: var(--ink-2); font-variant-numeric: tabular-nums; }
 
-  .snode { width: 158px; background: var(--surface); border: 1.5px solid var(--grid);
-           border-radius: 8px; padding: 8px 11px; cursor: default;
+  /* sized so the longest name still sits beside its chip without ellipsizing -- a store's name
+     is its identity. The row and the side pane compete for the same pixels */
+  .snode { width: 160px; background: var(--surface); border: 1.5px solid var(--grid);
+           border-radius: 8px; padding: 8px 10px; cursor: pointer;
            transition: border-color 0.25s, box-shadow 0.25s, opacity 0.25s; }
-  .snode.bucket { border-style: dashed; }
+  .snode:hover { border-color: var(--edge); }
   .nm { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
   .nm b { font-size: 13px; font-weight: 600; flex: 1; min-width: 0;
           overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .st { font-size: 9.5px; font-weight: 700; letter-spacing: 0.05em;
-        text-transform: uppercase; flex: none; }
-  .agg { display: flex; justify-content: space-between; align-items: baseline;
-         font-size: 12.5px; color: var(--ink-2); margin-top: 4px;
-         font-variant-numeric: tabular-nums; }
+  /* the table count is also the control that opens this store's walk. A chip, so it reads as
+     something to press before the pointer arrives -- hover alone can't advertise itself, and the
+     walk is the most substantial thing on the page to leave undiscovered. */
+  .kind { font-size: 9.5px; font-weight: 600; letter-spacing: 0.06em;
+          text-transform: uppercase; color: var(--muted); margin-top: 1px; }
+  .ustat.run { color: var(--blue); }
+  .tbls { margin-top: 5px; }
+  .st { font-size: 11.5px; color: var(--muted); display: inline-block;
+        border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px;
+        background: color-mix(in srgb, var(--grid) 40%, transparent);
+        transition: background 0.15s, border-color 0.15s, color 0.15s; }
+  .snode:hover .st { border-color: var(--edge); color: var(--ink-2);
+                     background: color-mix(in srgb, var(--grid) 90%, transparent); }
   .ck { font-size: 11px; flex: none; }
   .ck.hit { color: var(--good); }
   .ck.wait { color: var(--muted); }
@@ -92,20 +126,20 @@
   .s-default { color: var(--blue); }
   .s-attachments { color: var(--violet); }
   .s-files { color: var(--aqua); }
-  .s-filestore { color: var(--orange); }
-  .s-attachment_blobs { color: var(--magenta); }
-  .s-clickhouse { color: var(--yellow); }
+  .s-crons { color: var(--orange); }
+  .s-metrics { color: var(--magenta); }
 
-  path.edge { fill: none; stroke: var(--edge); stroke-width: 1.4; opacity: 0.8; }
-  path.edge.blob { stroke-dasharray: 2 4; stroke-width: 1.5; opacity: 0.7; }
-  path.edge.cross { stroke: var(--aqua); }
+  path.edge { fill: none; stroke: var(--edge); stroke-width: 1.4; opacity: 0.45; }
+  /* grey at rest whether or not it crosses a database: most stores do, so colouring that case
+     tinted nearly every edge. The aqua arrives on hover, with the label that says which it is.
+     Declared before .active so a copying edge stays blue even while hovered */
+  path.edge.hi { stroke: var(--aqua); opacity: 1; stroke-width: 2.2; }
   path.edge.active { stroke: var(--blue); stroke-width: 2.2; opacity: 1;
                      stroke-dasharray: 7 5; animation: crawl 0.5s linear infinite; }
   path.edge.live { stroke-dasharray: 7 5; animation: crawl 1.4s linear infinite; }
-  /* scope edges are drawn child->spine (FK direction); reverse their crawl so flow
-     always reads spine-outward */
+  /* scope edges are drawn child->parent (FK direction); reverse their crawl so flow always
+     reads outward, from the parents the whole move resolves against */
   path.edge.up.active, path.edge.up.live { animation-direction: reverse; }
-  path.edge.hi { opacity: 1; stroke-width: 2.2; }
   path.edge.dim { opacity: 0.08; }
   @keyframes crawl { to { stroke-dashoffset: -12; } }
   text.elabel { font: 10px system-ui, sans-serif; fill: var(--muted);
@@ -121,37 +155,61 @@
   #tip .l { color: var(--ink-2); margin-top: 2px; }
   #tip .l span { color: var(--ink); }
 
+  /* a store's detail is clicked, not hovered -- it holds an expandable tree, so unlike #tip it
+     takes pointer events and stays until dismissed */
+  #storepop { position: fixed; z-index: 20; display: none; width: 350px;
+              background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+              box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18); padding: 8px 12px 10px;
+              font-size: 12.5px; line-height: 1.5; color: var(--ink-2); }
+  #storepop.open { display: block; }
+  #storepop b { color: var(--ink); font-size: 13px; }
+  #storepop .l { margin-top: 2px; }
+  #storepop .l span { color: var(--ink); }
+  #storepop .x { float: right; cursor: pointer; color: var(--muted); margin-left: 8px; }
+  /* the walk: this store's tables nested under whatever scopes them, collapsed until clicked */
+  .treelab { font-size: 10px; font-weight: 700; letter-spacing: 0.07em;
+             text-transform: uppercase; color: var(--muted); margin-top: 8px;
+             padding-top: 7px; border-top: 1px solid var(--grid); }
+  /* the nesting is what scopes what; the sequence is a different graph -- one edge per table
+     here, every ref there -- so the order gets said rather than left to be inferred */
+  .treenote { font-size: 11px; color: var(--muted); margin-top: 3px; }
+  .tree { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+          max-height: 320px; overflow: auto; margin-top: 5px; }
+  .tree summary { cursor: pointer; list-style: none; padding: 1px 0; }
+  .tree summary::-webkit-details-marker { display: none; }
+  .tree summary::before { content: "▸"; display: inline-block; width: 11px; color: var(--muted); }
+  .tree details[open] > summary::before { content: "▾"; }
+  .tree .kids { margin-left: 5px; padding-left: 8px; border-left: 1px solid var(--grid); }
+  .tree .leaf { padding: 1px 0 1px 11px; }
+  .tree .by { color: var(--muted); }
+  .tree .n { color: var(--ink-2); font-variant-numeric: tabular-nums; }
+
   /* ---- side panel ---- */
   .side .card { margin-bottom: 16px; }
   .lagbar { height: 4px; border-radius: 2px; background: var(--grid); overflow: hidden;
             margin: 1px 0 7px; }
   .lagbar div { height: 100%; width: 0%; background: var(--blue); border-radius: 2px;
                 transition: width 0.3s, background 0.3s; }
+  #drainrows .kv { font-size: 12.5px; padding: 2px 0; gap: 10px; }
+  #drainrows .kv span:first-child { min-width: 0; overflow: hidden;
+                                    text-overflow: ellipsis; white-space: nowrap; }
+  #drainrows .kv span:last-child { color: var(--ink-2); white-space: nowrap; }
+  #drainrows .kv span.hit { color: var(--good); }
+  .quietbar div { background: var(--aqua); }        /* draining, distinct from lag blue */
+  .quietbar div.done { background: var(--good); }   /* quiet >= GRACE: drained */
+  /* not-ready cue: the unfilled track is faintly red until drained, so red recedes as it fills */
+  .quietbar.pending { background: color-mix(in srgb, var(--bad) 18%, var(--grid)); }
   #snap-stores .kv { font-size: 12.5px; }
-  #snap-stores .kv span:last-child { color: var(--ink-2); }
+  .unitrow { cursor: help; }
+  .unitrow:hover { background: color-mix(in srgb, var(--grid) 45%, transparent); }
+  /* the reading stays on one line; a long store name ellipsizes instead of pushing it to two */
+  #snap-stores .kv span:first-child { min-width: 0; overflow: hidden;
+                                      text-overflow: ellipsis; white-space: nowrap; }
+  #snap-stores .kv span:last-child { color: var(--ink-2); flex: none; white-space: nowrap; }
   #snap-stores .kv span.hit { color: var(--good); }
   .kv { display: flex; justify-content: space-between; font-size: 13px;
         color: var(--ink-2); padding: 2px 0; font-variant-numeric: tabular-nums; }
   .kv span:last-child { color: var(--ink); }
-  .g { font-weight: 600; }
-  .g.ok { color: var(--good); }
-  .g.no { color: var(--muted); }
-  #btn-cut { width: 100%; margin-top: 8px; padding: 7px; border-radius: 6px;
-             font: 13px system-ui, sans-serif; border: 1px solid var(--border);
-             background: none; color: var(--muted);
-             transition: background 0.15s, color 0.15s, border-color 0.15s,
-                         box-shadow 0.15s, transform 0.05s; }
-  #btn-cut.arm { background: var(--blue); border-color: var(--blue); color: #fff;
-                 font-weight: 600; cursor: pointer; }
-  #btn-cut.arm:hover { box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 30%, transparent); }
-  #btn-cut.arm:active { transform: translateY(1px); }
-  #btn-cut.busy { border-color: var(--aqua); color: var(--aqua); font-weight: 600;
-                  animation: blink 2.8s ease-in-out infinite; }
-  #btn-cut.done { border-color: var(--good); color: var(--good); font-weight: 600; }
-  #btn-thaw { width: 100%; margin-top: 6px; padding: 5px; border-radius: 6px;
-              font: 12px system-ui, sans-serif; border: 1px solid var(--border);
-              background: none; color: var(--ink-2); cursor: pointer; }
-  #btn-thaw:hover { color: var(--ink); border-color: var(--muted); }
 
   /* ---- feed ---- */
   .feed { margin-top: 16px; }
@@ -161,15 +219,16 @@
              align-items: baseline; }
   .feed li:last-child { border-bottom: 0; }
   .feed .t { color: var(--muted); font-variant-numeric: tabular-nums; flex: none; }
-  .chip { flex: none; width: 76px; font-size: 10.5px; font-weight: 600;
+  /* the chip is the unit the line came from (move_event.unit), tinted to match that unit's card
+     above; `move` = org-level, which is where the operator's intent and the phase transitions
+     land. Narration is the page's own voice -- the ledger has no equivalent -- so it gets no chip */
+  .chip { flex: none; width: 128px; font-size: 10.5px; font-weight: 600;
           letter-spacing: 0.04em; text-transform: uppercase; }
   .chip::before { content: "●"; margin-right: 5px; font-size: 8px; vertical-align: 1px; }
-  .k-write { color: var(--blue); }
-  .k-apply { color: var(--aqua); }
-  .k-setup, .k-snap, .k-note { color: var(--muted); }
-  .k-ok { color: var(--good); }
+  .chip.u-move { color: var(--muted); }
+  .chip.u-move::before { content: none; }
   .x { color: var(--ink); overflow-wrap: anywhere; }
-  li.note .x { color: var(--ink-2); font-style: italic; }
+  li.narration .x { color: var(--ink-2); font-style: italic; }
 </style>
 </head>
 <body>
@@ -178,7 +237,7 @@
     <h1>Monarch <small id="sub">moving org 1 (evil-corp): source → sink</small></h1>
     <div class="status">
       <ol id="stepper"></ol>
-      <span id="pill" class="pill">…</span>
+      <button id="go" class="cta">▶ start the move</button>
     </div>
   </header>
   <p id="banner"></p>
@@ -193,41 +252,22 @@
 
     <div class="side">
       <article class="card">
-        <h2>snapshot</h2>
+        <h2>snapshot<span class="help" data-help="snapshot">?</span></h2>
         <div id="snap-stores"></div>
       </article>
       <article class="card">
-        <h2>stream lag</h2>
-        <div class="kv"><span>default</span><span id="lagv-default">–</span></div>
-        <div class="lagbar"><div id="lagb-default"></div></div>
-        <div class="kv"><span>attachments</span><span id="lagv-attachments">–</span></div>
-        <div class="lagbar"><div id="lagb-attachments"></div></div>
-        <div class="kv"><span>files</span><span id="lagv-files">–</span></div>
-        <div class="lagbar"><div id="lagb-files"></div></div>
-        <div class="kv"><span>errors</span><span id="lagv-errors">–</span></div>
-        <div class="lagbar"><div id="lagb-errors"></div></div>
-        <div class="kv"><span>eap</span><span id="lagv-eap">–</span></div>
-        <div class="lagbar"><div id="lagb-eap"></div></div>
+        <h2>stream<span class="help" data-help="stream">?</span></h2>
+        <div id="lagrows"></div>
       </article>
       <article class="card">
-        <h2>org quiet clock</h2>
-        <div class="kv"><span>default</span><span id="q-default">—</span></div>
-        <div class="kv"><span>attachments</span><span id="q-attachments">—</span></div>
-        <div class="kv"><span>files</span><span id="q-files">—</span></div>
-        <div class="kv"><span>errors</span><span id="q-errors">—</span></div>
-        <div class="kv"><span>eap</span><span id="q-eap">—</span></div>
-      </article>
-      <article class="card">
-        <h2 id="gates-title">freeze gates</h2>
-        <div id="gates"></div>
-        <button id="btn-cut" disabled>cut over</button>
-        <button id="btn-thaw" style="display: none"
-                title="abort: resume writes and return to streaming">unfreeze</button>
+        <h2>drain readiness<span class="help" data-help="drain">?</span></h2>
+        <div id="drainrows"></div>
       </article>
     </div>
   </div>
 </div>
 <div id="tip"></div>
+<div id="storepop"></div>
 
 <script>
 // Mockup only: the store layout mirrors postgres_config.yaml + fleet.yaml; numbers and the
@@ -236,66 +276,135 @@ const $ = id => document.getElementById(id);
 
 // ---- the catalog (manifest-shaped) ----
 const COUNT = {
-  organization: 1, project: 148, release: 41200, commit: 1240000, apikey: 34,
+  organization: 1, project: 21, release: 41200, commit: 1240000, apikey: 34,
   orgauthtoken: 12, group: 2400000, promptsactivity: 86000, releaseproject: 58300,
   groupinbox: 124000, groupassignee: 46800, grouprelease: 917000, grouphash: 3140000,
-  groupredirect: 212000, eventattachment: 484000, file: 618000,
-  errors: 90, eap: 90,  // clickhouse progress is measured in days of partitions, not rows
-  filestore: 542000, attachment_blobs: 484000,
+  groupredirect: 212000, eventattachment: 484000, userreport: 27400, file: 618000,
+  monitor: 320, monitorenvironment: 1100, monitorcheckin: 4310000, monitorincident: 8600,
+  monitorenvbrokendetection: 240, stringindexer: 96000,
 };
-const SPINE = ["organization", "project"];      // root + static tables: every cross-store edge binds here
+// the root plus every table declared static: what a cross-store edge is allowed to bind to
+const STATIC_PARENTS = ["organization", "project"];
 const FROZEN = new Set(["project"]);
 const STORES = [
-  // every store is its own pipeline in this example: own database/consumer, slot, stream
+  // every store is its own pipeline in this example: own database, slot, snapshot, stream
   { name: "default",
     tables: ["release", "commit", "apikey", "orgauthtoken", "group", "promptsactivity",
              "releaseproject", "groupinbox", "groupassignee", "grouprelease",
              "grouphash", "groupredirect"] },
-  { name: "attachments", cross: true, scope: "project_id", tables: ["eventattachment"] },
+  { name: "attachments", cross: true, scope: "project_id",
+    tables: ["eventattachment", "userreport"] },
   { name: "files", cross: true, scope: "project_id", tables: ["file"] },
-  // two clickhouse stores: each binds to whichever spine node scopes it -- always one of the two
-  { name: "errors", cross: true, scope: "project_id", ch: true, tables: ["errors"] },
-  { name: "eap", cross: true, scope: "organization_id", ch: true, tables: ["eap"] },
+  // its tables scope through each other, so not every one binds to a static parent directly: the
+  // walk has depth inside one store as well as across them
+  { name: "crons", cross: true, scope: "project_id",
+    tables: ["monitor", "monitorenvironment", "monitorcheckin", "monitorincident",
+             "monitorenvbrokendetection"] },
+  // binds to the root rather than to project -- a cross-store edge resolves against whichever
+  // static parent scopes it, and both are in play across the fleet
+  { name: "metrics", cross: true, scope: "organization_id", tables: ["stringindexer"] },
 ];
-const CH = new Set(STORES.filter(s => s.ch).map(s => s.name));
-const BUCKETS = ["attachment_blobs", "filestore"];  // ordered under their referencing stores
-const TABLE_BLOBS = { file: "filestore", eventattachment: "attachment_blobs" };
-// physical placement (fleet-shaped) lives in tooltips + the pipelines panel, not the diagram
-const PHASES = ["setup", "snapshot", "streaming", "freeze", "cutover", "evict"];
+// what scopes each table: [column, parent] in declaration order, the manifest's `refs` shape.
+// A table usually lists several -- the walk uses exactly one of them (scopeEdge below).
+const REFS = {
+  project:         [["organization_id", "organization"]],
+  release:         [["organization_id", "organization"]],
+  commit:          [["organization_id", "organization"]],
+  apikey:          [["organization_id", "organization"]],
+  orgauthtoken:    [["organization_id", "organization"]],
+  promptsactivity: [["organization_id", "organization"], ["project_id", "project"]],
+  groupredirect:   [["organization_id", "organization"], ["group_id", "group"]],
+  groupinbox:      [["organization_id", "organization"], ["project_id", "project"],
+                    ["group_id", "group"]],
+  group:           [["project_id", "project"]],
+  grouphash:       [["project_id", "project"], ["group_id", "group"]],
+  groupassignee:   [["group_id", "group"], ["project_id", "project"]],
+  grouprelease:    [["group_id", "group"], ["project_id", "project"]],
+  releaseproject:  [["release_id", "release"], ["project_id", "project"]],
+  eventattachment: [["project_id", "project"], ["group_id", "group"]],
+  userreport:      [["project_id", "project"], ["group_id", "group"]],
+  file:            [["project_id", "project"]],
+  monitor:         [["project_id", "project"]],
+  monitorcheckin:  [["project_id", "project"], ["monitor_id", "monitor"]],
+  // no static parent listed, so these fall through to the dynamic edge -- which is what gives
+  // crons depth inside its own store
+  monitorenvironment:        [["monitor_id", "monitor"]],
+  monitorincident:           [["monitorenvironment_id", "monitorenvironment"]],
+  monitorenvbrokendetection: [["monitorenvironment_id", "monitorenvironment"]],
+  stringindexer:   [["organization_id", "organization"]],
+};
+// the one edge that actually scopes a table: a static parent when one is listed -- its id set
+// can't change mid-move, so it is the cheapest filter and makes the scope independent of ref
+// order -- else the first parent. Ports config.py's scope_edge, and it is why grouprelease hangs
+// off project rather than group despite listing group_id first.
+const scopeEdge = t => {
+  const refs = REFS[t] ?? [];
+  return refs.find(([, p]) => STATIC_PARENTS.includes(p)) ?? refs[0] ?? null;
+};
+// physical placement (fleet-shaped) lives in tooltips, not the diagram
+const PHASES = ["setup", "snapshot", "streaming", "freeze", "cutover", "cleanup"];
 
 const sink = {}, sourceN = {};
 for (const n of Object.keys(COUNT)) { sourceN[n] = COUNT[n]; sink[n] = 0; }
 const storeOf = {};
 for (const s of STORES) for (const t of s.tables) storeOf[t] = s.name;
+for (const t of STATIC_PARENTS) storeOf[t] = "default";  // the spine lives in default
+// declaration order is already topological -- the static parents, then each store's tables
+// parents-first -- which is also the order the copy walks them
+const WALK = [...STATIC_PARENTS, ...STORES.flatMap(s => s.tables)];
 
-// ---- build the graph DOM: spine row, db-outline row, bucket row ----
+// this store's tables, each nested under whichever table scopes it. The top level is what the
+// store's walk starts from: the root when it lives here, otherwise the cross-store parents its
+// tables hang off -- the same edge the diagram draws. Ports dashboard.py's build_scope_tree.
+function buildScopeTree(store) {
+  const mine = WALK.filter(t => storeOf[t] === store);
+  const kidsOf = new Map();
+  for (const t of mine) {
+    const parent = scopeEdge(t)?.[1] ?? null;
+    if (!kidsOf.has(parent)) kidsOf.set(parent, []);
+    kidsOf.get(parent).push(t);
+  }
+  const node = t => {
+    const children = (kidsOf.get(t) ?? []).map(node);
+    // subtree size, so a collapsed branch still says how much it hides
+    return { table: t, children,
+             count: children.length + children.reduce((n, k) => n + k.count, 0) };
+  };
+  const roots = [];
+  for (const [parent, tables] of kidsOf) {
+    if (mine.includes(parent)) continue;  // an edge inside the store: already nested
+    if (parent === null) roots.push(...tables.map(node));  // the root lives here
+    // a cross-store parent still heads its branch: it is what these tables hang off, and
+    // `store` says it isn't one of ours
+    else roots.push({ ...node(parent), store: storeOf[parent] });
+  }
+  return roots;
+}
+
+// ---- build the graph DOM: the static parents, then one card per store ----
 const graphEl = $("graph"), svg = $("edges");
-const storeCard = s => {
-  const head = `<div class="nm"><b>${s.name}</b>` +
-    `<span class="st s-${s.ch ? "clickhouse" : s.name}">${s.ch ? "clickhouse"
-      : `${s.tables.length} table${s.tables.length > 1 ? "s" : ""}`}</span></div>`;
-  return `<div class="snode" id="s-${s.name}" data-node="s-${s.name}">${head}` +
-    `<div class="agg"><span id="agg-${s.name}">–</span>` +
-    `<span class="ck wait" id="aggk-${s.name}">…</span></div></div>`;
-};
+// name, then kind · status, then the table count -- the same order the live dashboard's node
+// uses. The count sits on its own line rather than beside the name: nothing competes with a long
+// store name for width, and the chip reads as a control instead of a suffix
+const storeCard = s => `
+  <div class="snode" id="s-${s.name}" data-node="s-${s.name}">
+    <div class="nm"><b class="s-${s.name}">${s.name}</b></div>
+    <div class="kind">postgres<span class="ustat" id="ustat-${s.name}"></span></div>
+    <div class="tbls"><span class="st">${s.tables.length} table${
+      s.tables.length > 1 ? "s" : ""}</span></div>
+  </div>`;
 graphEl.insertAdjacentHTML("beforeend", `
   <div class="grow">
-    <div class="spinecard" id="spine" data-node="spine">
-      <div class="spinelab">fixed for the move — every cross-store edge binds here</div>
-      <div class="minis">${SPINE.map(n =>
+    <div class="staticcard" id="static" data-node="static">
+      <div class="staticlab">fixed for the move — every cross-store edge binds here</div>
+      <div class="minis">${STATIC_PARENTS.map(n =>
         `<div class="mini" id="m-${n}"><b>${FROZEN.has(n) ? "📌 " : ""}${n}</b>` +
         `<span class="mv" id="tv-${n}">0 / ${COUNT[n]}</span>` +
         `<span class="ck wait" id="tk-${n}">…</span></div>`).join("")}
       </div>
     </div>
   </div>
-  <div class="grow">${STORES.map(storeCard).join("")}</div>
-  <div class="grow">${BUCKETS.map(b =>
-    `<div class="snode bucket" id="s-${b}" data-node="s-${b}">` +
-    `<div class="nm"><b>${b}</b><span class="st s-${b}">bucket</span></div>` +
-    `<div class="agg"><span id="agg-${b}">–</span>` +
-    `<span class="ck wait" id="aggk-${b}">…</span></div></div>`).join("")}
-  </div>`);
+  <div class="grow">${STORES.map(storeCard).join("")}</div>`);
 
 // ---- refresh: table rows roll up into store aggregates ----
 const fmtC = n => n < 10000 ? n : Intl.NumberFormat("en",
@@ -316,39 +425,26 @@ function storeTotals(s) {
   }
   return { got, exact, all, any };
 }
-const totText = t => t.all ? fmtC(t.exact) : t.any ? fmtC(t.exact) + "+" : "?";
+// the unit's status, derived rather than stored: the mock has no ledger, but the same facts are
+// on hand -- when its copy started and finished, whether a stream is live, and the phase
+function unitStatus(name) {
+  if (phaseNow === "done") return "evicted";
+  if (phaseNow === "cleanup") return "slot dropped";
+  if (tails[name] !== null) return "streaming";
+  if (copiedRows[name] !== undefined) return "copied";
+  if (startedAt[name] !== undefined) return "copying";
+  return "pending";
+}
+// the node carries structure and state, not numbers: counts live in the snapshot card, lag in
+// the stream card, quiet time in drain readiness -- each in the one place that is about it
 function storeLine(name) {
-  const s = STORES.find(x => x.name === name);
-  const vEl = $(`agg-${name}`), kEl = $(`aggk-${name}`);
-  const streaming = tails[name] !== null && phaseNow !== "done";
-  if (streaming) {
-    vEl.textContent = quiet[name] !== null
-      ? `quiet ${Math.floor(quiet[name])}s` : fmtDur(tails[name]);
-    kEl.textContent = "● live";
-    kEl.className = "ck live";
-    return;
-  }
-  const tt = storeTotals(s);
-  vEl.textContent = `${fmtC(tt.got)} / ${totText(tt)} ${s.ch ? "days" : "rows"}`;
-  const hit = phaseNow === "done" ||
-    (tt.all && s.tables.every(t => sourceN[t] > 0 && sink[t] === sourceN[t]));
-  kEl.textContent = hit ? "✓" : "…";
-  kEl.className = "ck " + (hit ? "hit" : "wait");
+  const status = unitStatus(name);
+  const uEl = $(`ustat-${name}`);
+  uEl.textContent = ` · ${status}`;
+  uEl.className = "ustat" + (["copying", "streaming"].includes(status) ? " run" : "");
 }
 function refreshTable(t) {
-  if (CH.has(t)) {  // same grammar, different unit: days of partitions
-    storeLine(t);
-    return;
-  }
-  if (BUCKETS.includes(t)) {
-    // blob totals come from the referencing rows' keys: unknown until that table is sized
-    const ref = t === "filestore" ? "file" : "eventattachment";
-    const totTxt = sized.has(ref) ? fmtC(sourceN[t]) : "?";
-    $(`agg-${t}`).textContent = `${fmtC(Math.min(sink[t], sourceN[t]))} / ${totTxt} objects`;
-    glyph($(`aggk-${t}`), sized.has(ref) && sourceN[t] > 0 && sink[t] === sourceN[t]);
-    return;
-  }
-  if (SPINE.includes(t)) {
+  if (STATIC_PARENTS.includes(t)) {
     $(`tv-${t}`).textContent = `${fmtC(sink[t])} / ${fmtC(sourceN[t])}`;
     glyph($(`tk-${t}`), sourceN[t] > 0 && sink[t] === sourceN[t]);
     return;
@@ -358,19 +454,19 @@ function refreshTable(t) {
   storeLine(s.name);
 }
 
-const CH_DAYS = 90;
-
-// ---- edges: store → spine (+ store → bucket), drawn over the layout ----
+// ---- edges: store → the static parent that scopes it, drawn over the layout ----
 const SEDGES = [
   { from: "s-default", to: "m-organization", kind: "scope", label: "same WAL" },
   { from: "s-attachments", to: "m-project", kind: "scope", cross: true, label: "project_id · cross-db" },
   { from: "s-files", to: "m-project", kind: "scope", cross: true, label: "project_id · cross-db" },
-  { from: "s-errors", to: "m-project", kind: "scope", cross: true, label: "project_id · cross-db" },
-  { from: "s-eap", to: "m-organization", kind: "scope", cross: true, label: "organization_id · cross-db" },
-  { from: "s-files", to: "s-filestore", kind: "blob", label: "path" },
-  { from: "s-attachments", to: "s-attachment_blobs", kind: "blob", label: "blob_path" },
+  { from: "s-crons", to: "m-project", kind: "scope", cross: true, label: "project_id · cross-db" },
+  { from: "s-metrics", to: "m-organization", kind: "scope", cross: true, label: "organization_id · cross-db" },
 ];
 const paths = {}, labels = {};
+const bez = (p0, p1, p2, p3, t) => {
+  const u = 1 - t;
+  return u * u * u * p0 + 3 * u * u * t * p1 + 3 * u * t * t * p2 + t * t * t * p3;
+};
 function drawEdges() {
   svg.innerHTML = "";
   const base = graphEl.getBoundingClientRect();
@@ -391,20 +487,21 @@ function drawEdges() {
     paths[`${e.from}->${e.to}`] = p;
     // labels stay hidden until a hover singles the edge out -- they pile up otherwise
     const t = document.createElementNS("http://www.w3.org/2000/svg", "text");
-    t.setAttribute("x", x1 + (x2 - x1) * 0.25 + 7);
-    t.setAttribute("y", y1 + (y2 - y1) * 0.25 + 3);
+    // on the curve, near the store end: the label belongs to the store that binds, and the
+    // straight line between anchors is nowhere near the path the bezier actually takes
+    t.setAttribute("x", bez(x1, x1, x2, x2, 0.25) + 8);
+    t.setAttribute("y", bez(y1, y1 + dy, y2 - dy, y2, 0.25));
     t.setAttribute("class", "elabel" + (e.cross ? " cross" : ""));
     t.textContent = e.label;
     svg.appendChild(t);
     labels[`${e.from}->${e.to}`] = t;
   }
 }
-const cardOf = t => SPINE.includes(t) ? $("spine")
-  : BUCKETS.includes(t) ? $(`s-${t}`) : $(`s-${storeOf[t]}`);
+const cardOf = t => STATIC_PARENTS.includes(t) ? $("static") : $(`s-${storeOf[t]}`);
 
 // ---- hover: dim everything unrelated; tooltip per card ----
 const touches = (e, id) => e.from === id || e.to === id ||
-  (id === "spine" && e.to.startsWith("m-"));
+  (id === "static" && e.to.startsWith("m-"));
 function highlight(id) {
   for (const e of SEDGES) {
     const key = `${e.from}->${e.to}`;
@@ -416,56 +513,89 @@ function highlight(id) {
     const nid = el.dataset.node;
     const near = !id || nid === id ||
       SEDGES.some(e => touches(e, id) && (e.from === nid || e.to === nid ||
-        (nid === "spine" && e.to.startsWith("m-"))));
+        (nid === "static" && e.to.startsWith("m-"))));
     el.classList.toggle("dimmed", !!id && !near);
   }
 }
-const tableList = name => {
-  const s = STORES.find(x => x.name === name);
-  return s.tables.map(t =>
-    `${t} ${fmtC(Math.min(sink[t], sourceN[t]))}/${fmtC(sourceN[t])}`).join(" · ");
-};
+// one row of the walk: the table, how much of the subtree it hides, which store it belongs to
+// when it isn't this one, and the copy counts the flat table list used to carry
+function treeNode(n) {
+  const meta = [n.count ? `(${n.count})` : "", n.store ? `in ${n.store}` : ""].filter(Boolean);
+  const by = meta.length ? ` <span class="by">${meta.join(" ")}</span>` : "";
+  const got = `<span class="n"> ${fmtC(Math.min(sink[n.table], sourceN[n.table]))}` +
+    `/${fmtC(sourceN[n.table])}</span>`;
+  if (!n.children.length) return `<div class="leaf">${n.table}${by}${got}</div>`;
+  return `<details><summary>${n.table}${by}${got}</summary>` +
+    `<div class="kids">${n.children.map(treeNode).join("")}</div></details>`;
+}
 const TIPS = {
-  spine: () => `<b>the spine</b><div class="l">the root plus 📌 static tables — their id sets
-    are assumed not to change during the move (a violating write aborts it), so every
-    cross-store edge resolves against a <span>fixed target</span>. This is what lets
-    independent streams compose into one consistent move.</div>`,
-  "s-default": () => `<b>default</b><div class="l">postgres · its own WAL, slot and stream</div>
-    <div class="l">holds the spine; its child tables scope internally — parent → child order
-    is <span>guaranteed by the WAL</span>, nothing to coordinate</div>
-    <div class="l">${tableList("default")}</div>`,
-  "s-attachments": () => `<b>attachments</b><div class="l">postgres · its own WAL, slot and stream</div>
-    <div class="l">scoped by <span>project_id</span> → spine, <span>across databases</span>:
-    no shared WAL, no shared transaction — sound only because 📌 project's id set stays static</div>
-    <div class="l">${tableList("attachments")}</div>`,
-  "s-files": () => `<b>files</b><div class="l">postgres · its own WAL, slot and stream</div>
-    <div class="l">scoped by <span>project_id</span> → spine, <span>across databases</span>:
-    no shared WAL, no shared transaction — sound only because 📌 project's id set stays static</div>
-    <div class="l">${tableList("files")}</div>`,
-  "s-errors": () => `<b>errors</b><div class="l">clickhouse · column store, partitioned by date</div>
-    <div class="l">scoped by <span>project_id</span> → spine; copied <span>by date partition</span>
-    — a watermark over the ${CH_DAYS}-day retention window; the tail follows the
-    <span>commit-log offset</span>, not an LSN</div>`,
-  "s-eap": () => `<b>eap</b><div class="l">clickhouse · column store, partitioned by date</div>
-    <div class="l">scoped by <span>organization_id</span> → spine — same shape as errors, just
-    bound to the other spine node; watermark backfill + commit-log tail</div>`,
-  "s-filestore": () => `<b>filestore</b><div class="l">content-addressed bucket</div>
-    <div class="l">objects referenced by <span>file.path</span>; bytes are copied
-    <span>before</span> the rows that point at them</div>`,
-  "s-attachment_blobs": () => `<b>attachment_blobs</b><div class="l">per-row bucket</div>
-    <div class="l">objects referenced by <span>eventattachment.blob_path</span>; bytes copied
-    before rows; deleted with the org on eviction</div>`,
+  static: () => `<b>the static parents</b>
+    <div class="l">the root plus 📌 the tables declared static</div>
+    <div class="l">their id sets are assumed <span>fixed for the move</span> — a create or
+    delete fails the move, not the write. That fixed target is what lets independent streams
+    compose into one consistent move.</div>`,
+  "s-default": () => `<b>default</b><div class="l">its own WAL, slot and stream</div>
+    <div class="l">organization and project live here — one WAL, so
+    <span>parent → child order comes for free</span></div>`,
 };
-// per-store timing rows in the snapshot card: live elapsed while running, ✓ duration when done
+// every store but default binds across databases, so they all say the same thing here: which
+// static parent each one binds to, and how deep it goes, is what the walk below shows
+const crossTip = name => `<b>${name}</b>
+  <div class="l">its own WAL, slot and stream</div>
+  <div class="l">scoped <span>across databases</span> — no shared WAL, no shared transaction.
+  The static parent it binds to cannot change mid-move.</div>`;
+for (const s of STORES) {
+  if (s.name !== "default") TIPS[`s-${s.name}`] = () => crossTip(s.name);
+}
+// per-store rows in the three side cards, all built from STORES: a store added to the catalog
+// gets its snapshot timing, its lag bar and its quiet clock without touching the markup
+// planner estimates (EXPLAIN, never executed) -- deliberately off from what COPY actually moves:
+// estimate vs actual is the planner-quality delta, and pretending they agree would hide it
+const ESTIMATE = { default: 9040000, attachments: 478000, files: 702000,
+                   crons: 3960000, metrics: 91500 };
+const copiedRows = {};  // what each store's copy actually moved, frozen at completion
+const startedAt = {};   // when each store's copy began, for the hover
 $("snap-stores").innerHTML = STORES.map(s =>
-  `<div class="kv"><span>${s.name}</span><span id="sdur-${s.name}">–</span></div>`).join("");
+  `<div class="kv unitrow" data-unit="${s.name}"><span>${s.name}</span>` +
+  `<span id="sdur-${s.name}">–</span></div>`).join("");
+// text only: lag is a distance that goes up when things get worse, not progress toward a goal,
+// so it earns no bar. The one bar on the page is drain readiness, which does measure progress
+$("lagrows").innerHTML = STORES.map(s =>
+  `<div class="kv"><span>${s.name}</span><span id="lagv-${s.name}">–</span></div>`).join("");
 
 const tip = $("tip");
+// the snapshot row stays terse, so its numbers ride here -- one per line, and the estimate is its
+// own line rather than a parenthetical: one is counted by COPY, the other guessed by the planner,
+// and nothing here divides them
+const snapTip = name => {
+  const s = STORES.find(x => x.name === name);
+  const done = copiedRows[name] !== undefined;
+  const got = done ? copiedRows[name] : storeTotals(s).got;
+  if (startedAt[name] === undefined) return `<b>${name}</b> · snapshot`;
+  return `<b>${name}</b> · snapshot` +
+    `<div class="l">started: <span>` +
+    `${new Date(startedAt[name]).toLocaleTimeString("en-GB")}</span></div>` +
+    (got ? `<div class="l">rows copied${done ? "" : " so far"}: <span>${fmtC(got)}</span></div>` : "") +
+    `<div class="l">planner estimate: <span>~${fmtC(ESTIMATE[name])}</span></div>`;
+};
+for (const row of document.querySelectorAll(".unitrow")) {
+  row.addEventListener("mouseleave", () => { tip.style.display = "none"; });
+  row.addEventListener("mousemove", ev => {
+    if (openedStore) { tip.style.display = "none"; return; }
+    tip.innerHTML = snapTip(row.dataset.unit);
+    tip.style.display = "block";
+    tip.style.left = Math.min(ev.clientX + 14, innerWidth - 300) + "px";
+    tip.style.top = ev.clientY + 14 + "px";
+  });
+}
 for (const el of document.querySelectorAll("[data-node]")) {
   const id = el.dataset.node;
   el.addEventListener("mouseenter", () => highlight(id));
   el.addEventListener("mouseleave", () => { highlight(null); tip.style.display = "none"; });
   el.addEventListener("mousemove", ev => {
+    // a store card is clicked, not hovered: its panel holds an expandable tree, so it has to
+    // stay put. The spine card has no walk to show and keeps its hover tip.
+    if (openedStore || id !== "static") { tip.style.display = "none"; return; }
     tip.innerHTML = TIPS[id] ? TIPS[id]() : "";
     tip.style.display = "block";
     tip.style.left = Math.min(ev.clientX + 14, innerWidth - 300) + "px";
@@ -473,132 +603,173 @@ for (const el of document.querySelectorAll("[data-node]")) {
   });
 }
 
+// ---- the store panel: the prose, then the whole walk this store's mover performs. One store at
+// a time, since the walk is per-store; the top level opens so the click lands on the shape
+// rather than a single closed row. Built at open time, so its counts are that moment's.
+let openedStore = null;
+function openStore(name, anchor) {
+  if (!STORES.some(s => s.name === name)) return;
+  openedStore = name;
+  const pop = $("storepop");
+  pop.innerHTML = `<span class="x">✕</span>${TIPS[`s-${name}`]()}` +
+    `<div class="treelab">the mover's walk</div>` +
+    `<div class="treenote">copy order: breadth-first, each table waits for every table
+      it references</div>` +
+    `<div class="tree">${buildScopeTree(name).map(treeNode).join("")}</div>`;
+  pop.classList.add("open");
+  for (const d of pop.querySelectorAll(".tree > details")) d.open = true;
+  // anchored to the card, clamped so a store near an edge doesn't push it off screen
+  const b = anchor.getBoundingClientRect();
+  pop.style.left = `${Math.min(b.left, innerWidth - pop.offsetWidth - 10)}px`;
+  pop.style.top = `${Math.min(b.bottom + 8, innerHeight - pop.offsetHeight - 10)}px`;
+  tip.style.display = "none";
+}
+function closeStore() {
+  openedStore = null;
+  $("storepop").classList.remove("open");
+}
+document.addEventListener("click", ev => {
+  const node = ev.target.closest?.(".snode");
+  if (node) return openStore(node.dataset.node.slice(2), node);
+  // inside the panel the clicks belong to its disclosure rows, except the close control
+  if (ev.target.closest?.("#storepop")) {
+    if (ev.target.classList.contains("x")) closeStore();
+    return;
+  }
+  closeStore();
+});
+document.addEventListener("keydown", ev => { if (ev.key === "Escape") closeStore(); });
+
 // ---- side panel + feed ----
 // lag is seconds-behind per stream: the operator's unit, and the cutover criterion
-const LAG_TARGET = 300;
 // one tail per store: in this example every store is its own pipeline -- own slot/consumer,
 // own snapshot handoff, own backlog (no colocation)
-const tails = { default: null, attachments: null, files: null, errors: null, eap: null };
-let snapshotDone = false, phaseNow = "setup";
-let freezeNow = false, cutNow = false, thawNow = false;  // the operator decisions
-let verified = false;  // freeze-exit check
-// the one freeze observable: per stream, seconds since anything of the org's was seen,
-// lag-corrected (null = not frozen). Silence ≥ GRACE means upstream is empty AND everything
-// of the org's is applied -- one measurement covers both; a straggler resets the clock.
+const tails = {};
+for (const s of STORES) tails[s.name] = null;
+// a stream's feed line is cumulative and news-only: at most one per FEED_SECS, and only when the
+// count moved since the last one, so an idle stream says nothing (stream.py, where it is 30s --
+// compressed here because the whole move plays in a couple of minutes)
+const FEED_SECS = 8;
+const applied = {}, feedAt = {}, feedCount = {};
+const feedApplied = name => {
+  if (Date.now() - feedAt[name] < FEED_SECS * 1000 || applied[name] === feedCount[name]) return;
+  feedAt[name] = Date.now();
+  feedCount[name] = applied[name];
+  feed(name, `streaming — ${applied[name].toLocaleString("en")} changes applied so far`);
+};
+let phaseNow = "setup";
+// the one drain observable: per stream, seconds since anything of the org's was last applied
+// (null = this stream has never carried an org change, so it has nothing to drain). Silence >=
+// GRACE means upstream is empty AND everything of the org's is applied -- one measurement covers
+// both; a straggler resets the clock. Counted only once the stream is caught up: a lagging stream
+// fakes silence otherwise, which is what CAUGHT_UP stands in for. The dashboard reads lag === 0
+// bytes exactly; this mock's lag never lands on zero (settle() floors it at 0.4 so a live stream
+// never claims "caught up ✓" -- streams are never done), so the threshold sits above the jitter
+// ceiling and only a real write burst trips it.
 const GRACE = 30;
-const quiet = { default: null, attachments: null, files: null, errors: null, eap: null };
+const CAUGHT_UP = 4;
+const quiet = {};
+for (const s of STORES) quiet[s.name] = null;
+// a stream the org never wrote through is excluded, not counted as zero
+const quietMin = () => {
+  const v = Object.values(quiet).filter(x => x !== null);
+  return v.length ? Math.min(...v) : null;
+};
+const HELP = {
+  snapshot: `<b>snapshot</b> — rows copied into the sink.` +
+    `<br>Each store copies in one transaction pinned to its slot's snapshot: atomic and` +
+    ` ordered inside, parallel and unshared across.` +
+    `<br>Bytes are relayed source → sink as-is, never parsed on the way.`,
+  stream: `<b>stream</b> — changes applied for this org, and how far behind each stream is.` +
+    `<br>Serial within a stream, in source commit order, and acked only once applied.` +
+    `<br>Other orgs' commits arrive too and are filtered on the way in — a store at 0 applied` +
+    ` is reading traffic and filtering all of it, not sitting idle.`,
+  drain: `<b>drain readiness</b> — has writing to this store stopped?` +
+    `<br>Caught up, then quiet for <b>${GRACE}s</b>: we infer upstream writers have stopped.`,
+};
+for (const badge of document.querySelectorAll(".help")) {
+  badge.addEventListener("mouseleave", () => { tip.style.display = "none"; });
+  badge.addEventListener("mousemove", ev => {
+    tip.innerHTML = HELP[badge.dataset.help];
+    tip.style.display = "block";
+    tip.style.left = Math.min(ev.clientX + 14, innerWidth - 300) + "px";
+    tip.style.top = ev.clientY + 14 + "px";
+  });
+}
 // a table's in-scope count is knowable only after its parents' ids are resolved -- the
-// walk discovers denominators as it descends. CH days are config facts, known upfront.
+// walk discovers denominators as it descends.
 const sized = new Set();
-// soak: post-flip reversible window -- reverse stream keeps the source current,
-// failback stays cheap; eviction (deleting the source copy) is the true point of no return
-const SETTLE = 30;
-let settleFor = null, sinkHealthy = false, evictNow = false, failbackNow = false;
 const fmtDur = v => v === null ? "not started" : v === 0 ? "caught up ✓"
   : v < 60 ? `${v.toFixed(1)}s behind` : `${Math.floor(v / 60)}m ${Math.round(v % 60)}s behind`;
+// drain readiness, one row + bar per live stream. Empty while the stream is still catching up
+// (a lagging stream's silence is its own backlog, not the org's), then filling aqua -> green with
+// quiet time toward GRACE. A stream the org never wrote through has nothing to drain and stays
+// neutral grey -- neither pending-red nor drained-green.
+function drainRow(name) {
+  if (tails[name] === null || phaseNow === "done") return null;
+  if (tails[name] > CAUGHT_UP) return { text: "catching up…", frac: 0 };
+  if (quiet[name] === null) return { text: "never written to", frac: 0, neutral: true };
+  const s = Math.floor(quiet[name]);
+  const done = quiet[name] >= GRACE;
+  return { text: done ? `no writes for ${s}s ✓` : `no writes for ${s}s / ${GRACE}s`,
+           frac: quiet[name] / GRACE, done };
+}
+// updated in place, never rebuilt: replacing the markup every tick gave the bars new elements
+// each time, so the width transition never ran and they snapped instead of moving
+$("drainrows").innerHTML = STORES.map(s =>
+  `<div id="drow-${s.name}" style="display: none">` +
+  `<div class="kv"><span>${s.name}</span><span id="dq-${s.name}"></span></div>` +
+  `<div class="lagbar quietbar" id="dbar-${s.name}"><div id="dfill-${s.name}"></div></div>` +
+  `</div>`).join("") +
+  `<div class="kv" id="dnone"><span>—</span><span>no active streams</span></div>`;
+function renderDrain() {
+  let any = false;
+  for (const s of STORES) {
+    const d = drainRow(s.name);
+    $(`drow-${s.name}`).style.display = d ? "" : "none";
+    if (!d) continue;
+    any = true;
+    const q = $(`dq-${s.name}`);
+    q.textContent = d.text;
+    q.className = d.done ? "hit" : "";
+    $(`dbar-${s.name}`).className = "lagbar quietbar" + (d.done || d.neutral ? "" : " pending");
+    const fill = $(`dfill-${s.name}`);
+    fill.style.width = Math.min(d.frac, 1) * 100 + "%";
+    fill.className = d.done ? "done" : "";
+  }
+  $("dnone").style.display = any ? "none" : "";
+}
 function renderSide() {
   // stream lag: one bar per stream, scaled to the 5-minute cutover budget
   const lagRow = (id, v) => {
+    // the mover's own count of change events applied for this org -- ticks while streaming, flat
+    // when the org goes quiet, and kept after the stream stops: what it applied stays true. A
+    // store the org never wrote through sits at 0, which is the honest reading, not a gap
+    const n = `${applied[id].toLocaleString("en")} applied · `;
     $(`lagv-${id}`).textContent =
-      v === null && ["done", "cutover", "evict"].includes(phaseNow) ? "stopped ✓" : fmtDur(v);
-    $(`q-${id}`).textContent = quiet[id] === null ? "—"
-      : `${Math.floor(quiet[id])}s${quiet[id] >= GRACE ? " ✓" : ""}`;
-    const bar = $(`lagb-${id}`);
-    bar.style.width = (v === null ? 0 : Math.min(v / LAG_TARGET, 1) * 100) + "%";
-    bar.style.background = v !== null && v >= LAG_TARGET ? "var(--bad)" : "var(--blue)";
+      v === null && ["done", "cutover", "cleanup"].includes(phaseNow) ? `${n}stopped ✓`
+      : v === null ? "not started"
+      : `${n}${fmtDur(v)}`;
   };
   for (const s of STORES) {
     lagRow(s.name, tails[s.name]);
     storeLine(s.name);  // … → ● live (seconds behind) → ✓ transitions ride the same tick
   }
-  // readiness gates: live conditions, re-evaluated on every tick -- they can un-flip
-  const streams = Object.values(tails);
-  // two decisions, two checklists: arming gates for FREEZE while streaming (cheap, stable
-  // conditions), then freeze-exit checks for the FLIP while frozen (drains + verification)
-  let rows, label, armed = false, cls = "", title = "";
-  if (phaseNow === "cutover" || phaseNow === "evict" || phaseNow === "done") {
-    rows = [
-      [`soaked ${settleFor === null ? "—" : Math.floor(settleFor) + "s"} / ≥ ${SETTLE}s`,
-       settleFor !== null && settleFor >= SETTLE,
-       "time on the sink with live traffic since the flip — long enough to trust the new home"],
-      ["sink cell healthy", sinkHealthy,
-       "ingest, queries and error rates nominal for the org on its new cell"],
-    ];
-    const unmet = rows.filter(r => !r[1]).map(r => r[0]).join(", ");
-    if (phaseNow === "done") { label = "✓ evicted"; cls = "done"; }
-    else if (phaseNow === "evict" || evictNow) { label = "evicting…"; cls = "busy"; }
-    else if (!unmet) {
-      label = "evict source →"; cls = "arm"; armed = true;
-      title = "delete the org's copy from the source cell — the true point of no return";
-    } else { label = "evict source"; title = "waiting on: " + unmet; }
-  } else if (phaseNow === "freeze") {
-    // one observable does the work: quiet time, lag-corrected, per stream
-    const qVals = Object.values(quiet);
-    const qMin = qVals.every(v => v !== null) ? Math.min(...qVals) : null;
-    rows = [
-      [`org quiet ${qMin === null ? "—" : Math.floor(qMin) + "s"} / ≥ ${GRACE}s`,
-       qMin !== null && qMin >= GRACE,
-       "seconds since any stream saw a change for the org, corrected for lag — silence " +
-       "this long means upstream queues are empty AND everything ours is applied; any " +
-       "straggler write resets the clock"],
-      ["copy verified", verified,
-       "row counts and content checks run in the quiet window, when nothing can change"],
-    ];
-    const unmet = rows.filter(r => !r[1]).map(r => r[0]).join(", ");
-    if (cutNow) { label = "cutting over…"; cls = "busy"; }
-    else if (!unmet) {
-      label = "cut over →"; cls = "arm"; armed = true;
-      title = "flip routing to the sink cell — effectively irreversible; only a data-abandoning disaster revert remains until eviction";
-    } else { label = "cut over"; title = "waiting on: " + unmet; }
-  } else {
-    rows = [
-      ["snapshot complete", snapshotDone,
-       "the bounded copy finished on every store"],
-      ["all streams < 5 min behind", streams.every(v => v !== null && v < LAG_TARGET),
-       "bounds the freeze window: draining to the watermark takes roughly the current lag"],
-    ];
-    const unmet = rows.filter(r => !r[1]).map(r => r[0]).join(", ");
-    if (freezeNow) {
-      label = thawNow ? "unfreezing…" : "freezing…"; cls = "busy";
-      title = "writes stopping; in-flight work finishing";
-    } else if (phaseNow === "streaming" && !unmet) {
-      label = "freeze writes →"; cls = "arm"; armed = true;
-      title = "stop all writes for evil-corp — starts the downtime window";
-    } else { label = "freeze writes"; title = "waiting on: " + (unmet || "streaming to begin"); }
-  }
-  $("gates-title").textContent =
-    phaseNow === "cutover" || phaseNow === "evict" || phaseNow === "done" ? "eviction gates"
-    : phaseNow === "freeze" ? "cutover gates" : "freeze gates";
-  $("gates").innerHTML = rows.map(([name, ok, tip]) =>
-    `<div class="kv" title="${tip}"><span>${name}</span>` +
-    `<span class="g ${ok ? "ok" : "no"}">${ok ? "✓" : "…"}</span></div>`
-  ).join("");
-  const btn = $("btn-cut");
-  btn.disabled = !armed;
-  btn.className = cls;
-  btn.textContent = label;
-  btn.title = title;
-  // the escape hatch is available from the instant a reversible state is entered
-  const freezing = phaseNow === "freeze" || (freezeNow && phaseNow === "streaming");
-  const escape = (freezing && !thawNow) ||
-    (phaseNow === "cutover" && !failbackNow && !evictNow);
-  const thawBtn = $("btn-thaw");
-  thawBtn.style.display = escape ? "" : "none";
-  thawBtn.textContent = phaseNow === "cutover" ? "revert — disaster only" : "unfreeze";
-  thawBtn.title = phaseNow === "cutover"
-    ? "return the org to the source copy, frozen at the flip point — ALL writes since cutover are abandoned; only for a fully-broken sink"
-    : "abort: resume writes and return to streaming";
+  renderDrain();
 }
 
-function feed(kind, text) {
-  const chip = { write: "source", apply: "sink", setup: "setup", snap: "snapshot",
-                 ok: "check", note: "note" }[kind] || kind;
+// one line per journal event, attributed to the unit that wrote it: a store or bucket name, or
+// `move` for the org-level lines (operator intent, phase transitions). Pass null for the page
+// narrating in its own voice, which is not a journal line at all.
+function feed(unit, text) {
+  const tint = unit === "move" ? "u-move" : `s-${unit}`;
   const li = document.createElement("li");
-  li.className = kind;
+  li.className = unit ? "" : "narration";
   li.innerHTML = `<span class="t">${new Date().toLocaleTimeString("en-GB")}</span>` +
-    `<span class="chip k-${kind}">${chip}</span><span class="x"></span>`;
+    `<span class="chip ${unit ? tint : ""}">${unit ?? ""}</span><span class="x"></span>`;
   li.querySelector(".x").textContent = text;
   const ol = $("feed");
+  ol.querySelector(".placeholder")?.remove();
   const stick = ol.scrollHeight - ol.scrollTop - ol.clientHeight < 40;
   ol.appendChild(li);
   if (stick) ol.scrollTop = ol.scrollHeight;
@@ -606,24 +777,41 @@ function feed(kind, text) {
 
 function setPhase(phase, banner) {
   phaseNow = phase;
-  const label = { setup: "setup", snapshot: "snapshot",
-                  streaming: "● live · streaming", freeze: "❄ frozen",
-                  cutover: "cut over", evict: "evicting",
-                  reverted: "⟲ reverted", done: "✓ moved" }[phase];
-  $("pill").textContent = label;
-  $("pill").className = "pill " +
-    (phase === "done" ? "ok" : phase === "reverted" ? "" : "run");
   $("banner").textContent = banner;
+  setCta(null);  // the move is working; nothing to press
   const now = phase === "done" ? PHASES.length : PHASES.indexOf(phase);
   $("stepper").innerHTML = PHASES.map((p, j) =>
     `<li class="${j < now ? "done" : j === now ? "now" : ""}">${p}</li>`
   ).join("");
-  renderSide();  // buttons and gates react to the phase immediately, not on the next tick
+  renderSide();  // the side panel reacts to the phase immediately, not on the next tick
 }
 
 // ---- the simulated move ----
 let runId = 0;
 const wait = ms => new Promise(r => setTimeout(r, ms));
+// pacing: the move pauses at each phase boundary so it can be talked over. Forward only --
+// a move has no reverse, and rebuilding an earlier state would mean every step carrying a
+// declared end-state. Reload to start again.
+// Nothing runs on its own: the move waits at every phase boundary for you to advance it. One
+// control, always in the same place, and only ever one thing it can mean -- solid and named
+// when it is your turn, quiet and naming the current phase while the move is working.
+let goNow = false, onGo = null;
+const gate = async label => {
+  setCta(label);
+  while (!goNow) await wait(100);
+  goNow = false;
+};
+// what the button says while the move is working -- the phase, in its own voice. This used to be
+// a separate pill, which stated the phase a third time next to the stepper and the button
+const WORKING = { setup: "setting up…", snapshot: "copying…", streaming: "streaming…",
+                  freeze: "draining…", cutover: "cutting over…", cleanup: "cleaning up…",
+                  done: "✓ moved" };
+function setCta(label) {
+  const b = $("go");
+  b.disabled = !label;
+  b.textContent = label ?? WORKING[phaseNow];
+}
+$("go").onclick = () => { if (onGo) onGo(); else goNow = true; };
 function copyIn(name, target, dur) {  // animate the sink count filling
   return new Promise(r => {
     const steps = Math.max(1, Math.min(target, 8));
@@ -648,332 +836,263 @@ async function play() {
   // reset
   for (const n of Object.keys(sink)) sink[n] = 0;
   Object.keys(sourceN).forEach(refreshTable);
-  for (const n of Object.keys(tails)) tails[n] = null;
-  snapshotDone = false; freezeNow = false; cutNow = false; thawNow = false;
-  verified = false; settleFor = null; sinkHealthy = false; evictNow = false; failbackNow = false;
+  for (const n of Object.keys(tails)) {
+    tails[n] = null;
+    applied[n] = 0; feedAt[n] = 0; feedCount[n] = 0;
+  }
   for (const n of Object.keys(quiet)) quiet[n] = null;
   sized.clear();
-  for (const n of CH) sized.add(n);  // retention windows are config facts, known upfront
   for (const s of STORES) {
     const el = $(`sdur-${s.name}`);
     el.textContent = "–";
     el.classList.remove("hit");
   }
-  $("feed").innerHTML = "";
+  // the feed is the whole story, so an empty box at rest reads as broken rather than as waiting
+  $("feed").innerHTML = `<li class="placeholder narration"><span class="x">empty until the move` +
+    ` starts — every operator request, phase change and mover step lands here</span></li>`;
   Object.values(paths).forEach(p => p.classList.remove("active", "live"));
   renderSide();
 
   setPhase("setup", "org 1 (evil-corp) lives on the source cell; the sink is empty");
-  feed("note", "counts come from the mover's own accounting (snapshot walk + apply counters) — the source is never queried for progress");
-  await wait(3500); if (!alive()) return;
+  await gate("▶ start the move"); if (!alive()) return;
+  feed("move", "move created: org 1, source -> sink");
+  feed(null, "counts come from the mover's own accounting (snapshot walk + apply counters) — the source is never queried for progress");
+  feed(null, "every line below says which unit wrote it; `move` is the org-level journal, one line per operator request and phase change");
+  await gate("next: snapshot ›"); if (!alive()) return;
 
   // publications + slots are setup on the way into snapshot, not states of their own
-  setPhase("snapshot", "spine first — then every store's pipeline runs in parallel; none waits for another");
-  feed("setup", 'CREATE PUBLICATION monarch_org_1_ins FOR TABLE "group" WHERE (project_id IN (1, 2, 3)), …');
-  feed("setup", "CREATE PUBLICATION monarch_org_1_mut FOR ALL TABLES (updates/deletes, filtered consumer-side)");
-  await wait(1500); if (!alive()) return;
-  feed("snap", "slots created on default, attachments and files — each exports its own consistent snapshot");
-  await wait(1200); if (!alive()) return;
-  const spineCard = $("spine");
-  spineCard.classList.add("copying");
-  for (const t of SPINE) {
-    sized.add(t);
-    await copyIn(t, sourceN[t], 1500); if (!alive()) return;
-    feed("snap", `${t} — ${fmtC(sourceN[t])} row(s) → sink`);
-  }
-  spineCard.classList.remove("copying");
-  feed("note", "spine ids are treated as static — every store's walk is now independent");
-  feed("note", "totals are discovered as each walk descends: a child can't be counted until its parents' ids are known");
+  setPhase("snapshot", "project's ids are read and fixed, then every store's pipeline runs in parallel");
+  feed("move", "snapshot requested");
+  await wait(800); if (!alive()) return;
+  // the spine is READ here, not copied: a SELECT of project's ids taken before any slot exists,
+  // which is what makes the other stores' row filters sound. The rows themselves are default's
+  // to copy, inside its own walk, like every other table it owns
+  const staticCard = $("static");
+  staticCard.classList.add("copying");
+  await wait(800); if (!alive()) return;
+  staticCard.classList.remove("copying");
+  feed("move", `project ids read and fixed: ${fmtC(COUNT.project)} of them, before any slot exists`);
+  feed(null, "every store's walk resolves against that set — which is what lets them run independently");
+  feed(null, "totals are discovered as each walk descends: a child can't be counted until its parents' ids are known");
   // one runner per store; only ordering left is parents-first inside each store
   // streams go live per database the moment its snapshot finishes -- no global barrier;
   // the backlog each drains is the WAL/offsets accrued during its own snapshot only
+  // lag decays toward a small steady state instead of random-walking: an unbiased walk with a
+  // floor has nothing pulling it back down, so streams that had caught up crept upward and never
+  // converged. One exponential does both jobs -- drains a backlog in ~9s of real time, then holds
+  // every stream near the fixed point, 0.18 / (1 - 0.82) ≈ 1s behind.
   const settle = v => v === null ? null
-    : v > 12 ? v * 0.97 : Math.max(0.4, v + (Math.random() - 0.5) * 4);
+    : Math.max(0.3, v * 0.82 + 0.18 + (Math.random() - 0.5) * 0.5);
   const startJitter = () => {
     const id = setInterval(() => {
       if (!alive()) return clearInterval(id);
       for (const n of Object.keys(tails)) tails[n] = settle(tails[n]);
-      if (tails.default !== null && Math.random() < 0.04) tails.default += 25;  // a write burst
+      for (const n of Object.keys(quiet)) if (quiet[n] !== null) quiet[n] += 0.4;
+      // a write burst -- only while writes are still happening: past the stop the org is quiet by
+      // definition, and a burst there would empty default's drain bar for no reason
+      if (phaseNow === "streaming" && tails.default !== null && Math.random() < 0.04)
+        tails.default += 25;
       renderSide();
     }, 400);
     return id;
   };
   let jitter = startJitter();
-  const backlog = { default: 90, attachments: 15, files: 25, errors: 60, eap: 45 };
+  const backlog = { default: 90, attachments: 15, files: 25, crons: 60, metrics: 8 };
   const startStream = name => {
     tails[name] = backlog[name];
     const e = SEDGES.find(x => x.from === `s-${name}` && x.kind === "scope");
     if (e) paths[`${e.from}->${e.to}`].classList.add("live");
-    feed("setup", `${name}: stream live — draining ${backlog[name]}s of backlog accrued during its snapshot`);
+    feed(name, `stream live — draining ${backlog[name]}s of backlog accrued since its slot was created`);
   };
+  // one publication pair and one slot per store, named for the org and the store, so nothing
+  // here is fleet-wide -- and the same name is what teardown drops at the end
+  const pubName = name => `monarch_org_1_${name}`;
+  // default owns the spine rows as well: organization and project are copied inside its own walk,
+  // parents-first like anything else it holds -- there is no separate spine copy step
+  const walkOf = s => s.name === "default" ? [...STATIC_PARENTS, ...s.tables] : s.tables;
   const runStore = async s => {
+    // workers poll for the trigger independently, so they don't pick it up in lockstep -- and the
+    // stagger is what keeps each store's setup pair together in the feed instead of interleaved
+    await wait(STORES.indexOf(s) * 260); if (!alive()) return;
     const t0 = Date.now();
+    startedAt[s.name] = t0;  // the row has no space for it; it rides in the hover instead
     const durEl = $(`sdur-${s.name}`);
-    const unit = s.ch ? "days" : "rows";
+    // rows actually copied, counting up -- never a fraction. There is no denominator to divide
+    // by until the copy ends: the only number available in advance is the planner's guess, and
+    // it only stands in until the first table lands (dashboard.html's snapLine)
     const tick = setInterval(() => {
       if (!alive()) return clearInterval(tick);
-      const tt = storeTotals(s);
-      durEl.textContent =
-        `${fmtC(tt.got)}/${totText(tt)} ${unit} · ${((Date.now() - t0) / 1000).toFixed(1)}s …`;
+      const got = storeTotals(s).got;
+      durEl.textContent = got ? `copying… ${fmtC(got)} rows` : "copying…";
     }, 300);
     const card = $(`s-${s.name}`);
     const e = SEDGES.find(x => x.from === `s-${s.name}` && x.kind === "scope");
     const edge = e ? paths[`${e.from}->${e.to}`] : null;
     card.classList.add("copying");
     edge?.classList.add("active");
-    for (const t of s.tables) {
+    // each mover creates its own plumbing when it starts copying -- one publication pair and one
+    // slot per store, named for the org and the store, so nothing here is fleet-wide
+    const pub = pubName(s.name);
+    const lsn = `0/${(0x1a2b3c0 + STORES.indexOf(s) * 0x4e21).toString(16).toUpperCase()}`;
+    // the same worker creates both, back to back, so they stay adjacent: publications first, then
+    // the slot that reads them
+    feed(s.name, `publications created: ${pub}_ins/${pub}_mut`);
+    feed(s.name, `slot created: ${pub} at ${lsn} — exporting its own consistent snapshot`);
+    await wait(400); if (!alive()) return;
+    for (const t of walkOf(s)) {
       if (!alive()) break;
       sized.add(t);  // the walk resolves this table's ids: its count exists from here on
       refreshTable(t);
-      await wait(200);
-      if (TABLE_BLOBS[t]) {
-        await copyIn(TABLE_BLOBS[t], sourceN[TABLE_BLOBS[t]], 1500);
-        if (!alive()) break;
-        feed("snap", `${TABLE_BLOBS[t]}: ${fmtC(sourceN[TABLE_BLOBS[t]])} blobs copied — bytes land before their rows`);
-      }
-      if (CH.has(t)) {
-        await copyIn(t, sourceN[t], 13500);
-        if (!alive()) break;
-        feed("snap", `${t}: ${sourceN[t]} days of partitions copied oldest-first (dedup absorbs replay)`);
-      } else {
-        await copyIn(t, sourceN[t], 2000);
-        if (!alive()) break;
-        feed("snap", `${t} — ${fmtC(sourceN[t])} rows → sink`);
-        await wait(350);
-      }
+      await wait(150);
+      await copyIn(t, sourceN[t], 1400);
+      if (!alive()) break;
+      await wait(250);
     }
     card.classList.remove("copying");
     edge?.classList.remove("active");
     clearInterval(tick);
     if (alive()) {
-      durEl.textContent = `✓ ${((Date.now() - t0) / 1000).toFixed(1)}s`;
+      // rows first, elapsed after -- the rows are the fact about the move, the seconds are
+      // only how long it took (dashboard.html's snapLine, same order)
+      copiedRows[s.name] = storeTotals(s).got;  // frozen here; streaming keeps growing the store
+      durEl.textContent =
+        `✓ ${fmtC(copiedRows[s.name])} rows · ${((Date.now() - t0) / 1000).toFixed(1)}s`;
       durEl.classList.add("hit");
-      startStream(s.name);
+      // the store's one copy-phase line: how many rows it moved, nothing per table
+      feed(s.name, `copied: ${fmtC(storeTotals(s).got)} rows across ${s.tables.length} tables`);
     }
   };
   await Promise.all(STORES.map(runStore));
   if (!alive()) return;
-  snapshotDone = true; renderSide();
-  feed("ok", "snapshot complete — a bounded job: a consistent copy as of each database's slot LSN");
-  await wait(2000); if (!alive()) return;
+  renderSide();
+  feed("move", "snapshot complete — a bounded job: a consistent copy as of each database's slot LSN");
+  await gate("next: streaming ›"); if (!alive()) return;
 
-  setPhase("streaming", "every stream went live as its own snapshot finished — now all are; runs until cutover");
-  const beat = async (name, srcDelta, sinkDelta, writeMsg, applyMsg) => {
-    if (freezeNow) return;  // the operator asked to freeze: no new demo traffic
-    sourceN[name] += srcDelta; refreshTable(name); renderSide();
-    feed("write", writeMsg);
-    const st = storeOf[name] ?? "default";  // spine tables live in default
-    if (tails[st] !== null) tails[st] += 3;
-    await wait(900); if (!alive()) return;
-    sink[name] += sinkDelta; refreshTable(name); renderSide();
-    flash(name);
-    feed("apply", applyMsg);
-    await wait(1800);
-  };
-  // at this scale changes flow as batches: one rollup line per window, not one per row
+  setPhase("streaming", "every store's stream goes live and drains the backlog its slot has been holding; runs until cutover");
+  feed("move", "stream requested");
+  for (const s of STORES) startStream(s.name);
+  feed(null, "started together here, as the CLI's snapshot-then-stream does; in production each store's stream goes live the moment its own snapshot ends — a slot pins WAL from creation, so waiting only grows the backlog it has to drain");
+  feed(null, "each stream applies one source transaction at a time, at its commit marker; the feed records what each stream applied — a cumulative count per store, never a line per row");
+  // at this scale nothing is logged per row or per table: each stream's only streaming-phase line
+  // is its running applied count. files and metrics are deliberately absent from the traffic below:
+  // a store with nothing of the org's in its WAL should be visibly silent, and the news-only feed
+  // line is what makes that legible.
   const BATCH_MIX = [["grouphash", 140, 260], ["group", 40, 90], ["groupinbox", 25, 55],
-                     ["grouprelease", 15, 40], ["commit", 8, 25], ["eventattachment", 12, 30]];
+                     ["grouprelease", 15, 40], ["commit", 8, 25], ["eventattachment", 12, 30],
+                     ["monitorcheckin", 60, 140]];
   const batch = async () => {
-    if (freezeNow) return;
-    const applied = [];
-    let total = 0;
+    const writes = [];
     for (const [t, lo, hi] of BATCH_MIX) {
       const k = lo + Math.floor(Math.random() * (hi - lo));
       sourceN[t] += k;
-      if (t === "eventattachment") sourceN.attachment_blobs += k;
-      applied.push([t, k]);
-      total += k;
+      writes.push([t, k]);
       refreshTable(t);
-      if (t === "eventattachment") refreshTable("attachment_blobs");
     }
     if (tails.default !== null) tails.default += 2;
     if (tails.attachments !== null) tails.attachments += 1;
+    if (tails.crons !== null) tails.crons += 2;
     renderSide();
-    const top = applied.slice(0, 3).map(([t, k]) => `${k} ${t}`).join(" · ");
-    feed("write", `source: ${total} writes — ${top}, …`);
     await wait(900); if (!alive()) return;
-    for (const [t, k] of applied) {
+    for (const [t, k] of writes) {
       sink[t] += k;
-      if (t === "eventattachment") sink.attachment_blobs += k;
       refreshTable(t);
-      if (t === "eventattachment") refreshTable("attachment_blobs");
     }
     flash("grouphash");
     renderSide();
-    feed("apply", `${total} changes applied → sink — buffered per source transaction, applied at commit`);
-    await wait(2400);
+    // a batch spans stores, and each store's mover accounts only for its own share
+    const byStore = {};
+    for (const [t, k] of writes) (byStore[storeOf[t]] ??= []).push(k);
+    for (const [st, ks] of Object.entries(byStore)) {
+      applied[st] += ks.reduce((sum, k) => sum + k, 0);
+      quiet[st] = 0;  // the last-applied clock the drain card reads; silent stores stay null
+      feedApplied(st);  // cumulative, and only if this store has news and hasn't spoken recently
+    }
+    // the trailing pause is where the operator's click lands, so let it break out early rather
+    // than making them wait out a whole batch
+    for (let i = 0; i < 24 && !goNow; i++) await wait(100);
   };
   await batch(); if (!alive()) return;
   await batch(); if (!alive()) return;
-  sourceN.filestore++; refreshTable("filestore");
-  feed("note", "one write worth narrating amid the batches — the cross-database ordering case:");
-  feed("write", "filestore blob 9f2c41ab08d1… written — bytes land first");
-  await wait(700); if (!alive()) return;
-  await beat("file", 1, 1, "INSERT file id=618241 — the referencing row, on a different database",
-             "blob 9f2c41ab08d1… copied, then INSERT file id=618241 → sink");
+  // streaming has no natural end: it trickles on until writes are stopped, which is an operator
+  // decision. The doc has no controls of its own, so it plays the decisions rather than offering
+  // them, and narrates the exits it can no longer take.
+  feed(null, "streaming never finishes — stopping writes is an operator decision, taken while the streams are caught up");
+  feed(null, "giving up costs nothing until the flip: the org never left the source, so an abort tears down the plumbing and the move ends there");
+  // the org keeps writing until it is told to stop. Parked here with the streams idle, the quiet
+  // clocks would climb to 30s and the drain card would call the org drained while traffic is
+  // still notionally flowing -- and the freeze would then open with its straggler already due
+  setCta("next: stop writes ›");
+  while (alive() && !goNow) await batch();
   if (!alive()) return;
-  sink.filestore++; refreshTable("filestore"); renderSide();
-  feed("note", "the TOAST case: ship a big out-of-line value, then update around it");
-  await beat("commit", 0, 0, "UPDATE commit id=1 — message is now ~160 kB, TOASTed out of line",
-             "UPDATE commit id=1 → sink");
-  if (!alive()) return;
-  await beat("commit", 0, 0,
-             "UPDATE commit id=1 again, not touching message — pgoutput omits the unchanged column",
-             "partial UPDATE commit id=1 → sink (update-only; the big value survives)");
-  if (!alive()) return;
-  // streaming has no natural end: trickle on until the operator freezes writes.
-  // Freeze is reversible -- unfreeze aborts any step and returns to streaming; the
-  // streaming ↔ freeze loop can run many times, the flip happens once.
-  feed("note", "streaming never finishes — freezing is an operator decision taken while the gates are green");
-  const thawable = async ms => {  // wait, but bail out early if the operator unfreezes
-    const t0 = Date.now();
-    while (alive() && !thawNow && Date.now() - t0 < ms) await wait(150);
-    return alive() && !thawNow;
-  };
-  const runFreeze = async () => {
-    setPhase("freeze", "writes stopped — now we just watch: quiet time is the evidence");
-    feed("setup", "operator: freeze writes");
-    feed("setup", "writes for evil-corp stopped at the edge — new traffic buffers against the flip");
-    feed("setup", `one check from here: seconds since any stream saw an org change, lag-corrected — ${GRACE}s of silence means the queues are empty AND everything ours is applied`);
-    if (!await thawable(1500)) return false;
-    for (const n of Object.keys(quiet)) quiet[n] = 0;
-    let straggled = false;
-    while (alive() && !thawNow) {
-      await wait(400);
-      for (const n of Object.keys(quiet)) quiet[n] += 2.5 + Math.random();
-      // a delayed task fires mid-freeze: the clock resets, visibly -- it can't be fooled
-      if (!straggled && Math.min(...Object.values(quiet)) > GRACE * 0.55) {
-        straggled = true;
-        quiet.default = 0;
-        tails.default += 2;
-        flash("group");
-        feed("write", "a delayed task fires — default sees one last org write; its quiet clock resets");
-      }
-      renderSide();
-      if (Math.min(...Object.values(quiet)) >= GRACE) break;
-    }
-    if (!alive() || thawNow) return false;
-    feed("ok", `org quiet ≥ ${GRACE}s on every stream — upstream drained and everything applied, by observation alone`);
-    setPhase("freeze", "verifying the copy");
-    if (!await thawable(1600)) return false;
-    verified = true;
-    renderSide();
-    feed("ok", "every table and blob store matches; TOAST value intact (160,021 chars both sides)");
-    setPhase("freeze", "❄ frozen and verified — cut over when ready, or unfreeze");
-    while (alive() && !cutNow && !thawNow) await wait(250);
-    return alive() && !thawNow;
-  };
-  let moved = false;
-  while (alive() && !moved) {
-    let flip = false;
-    while (alive() && !flip) {
-      while (alive() && !freezeNow) await batch();
-      if (!alive()) return;
-      if (thawNow) {  // aborted before the freeze even engaged
-        freezeNow = false; thawNow = false;
-        feed("setup", "operator: unfreeze — freeze cancelled before it engaged");
-        renderSide();
-        continue;
-      }
-      flip = await runFreeze();
-      if (!alive()) return;
-      if (!flip) {  // thawed: writes resume; the streams never stopped -- just the checks reset
-        freezeNow = false; thawNow = false;
-        verified = false;
-        for (const n of Object.keys(quiet)) quiet[n] = null;
-        setPhase("streaming", "unfrozen — writes resumed, back to steady state");
-        feed("setup", "operator: unfreeze — writes for evil-corp resume; the streams never stopped");
-        renderSide();
-      }
-    }
-    if (!alive()) return;
+  goNow = false;
 
-    // the flip: effectively irreversible -- what remains is a parachute, not a road back
-    setPhase("cutover", "flipping routing to the sink cell");
-    feed("setup", "operator: cut over");
-    await wait(1500); if (!alive()) return;
-    clearInterval(jitter);
-    for (const n of Object.keys(quiet)) quiet[n] = null;
-    for (const n of Object.keys(tails)) tails[n] = null;
-    Object.values(paths).forEach(p => p.classList.remove("live"));
-    feed("setup", "routing flipped: evil-corp is now served by the sink cell; buffered writes replay there");
-    feed("setup", "streams stopped; slots + publications dropped — the source copy is retained, frozen at the flip point, until eviction");
-    settleFor = 0; sinkHealthy = false;
-    setPhase("cutover", "org on the sink; the frozen source copy is the disaster parachute — evict when confident");
-    renderSide();
-    while (alive() && !failbackNow && !evictNow) {
-      await wait(400);
-      settleFor += 2.5 + Math.random();
-      if (!sinkHealthy && settleFor > SETTLE * 0.5) {
-        sinkHealthy = true;
-        feed("ok", "sink cell healthy: ingest, queries and error rates nominal for evil-corp");
-      }
-      renderSide();
+  setPhase("freeze", "writes stopped — now we just watch: quiet time is the evidence");
+  feed("move", "operator: stop writes");
+  feed("move", "writes for evil-corp stopped at the edge — new traffic buffers against the flip");
+  feed("move", `one check from here: seconds since any stream saw an org change, lag-corrected — ${GRACE}s of silence means the queues are empty AND everything ours is applied`);
+  await wait(1500); if (!alive()) return;
+  let straggled = false;
+  while (alive()) {
+    await wait(400);
+    // a delayed task fires mid-freeze: the clock resets, visibly -- it can't be fooled
+    // early: the reset has to land while the bars are visibly moving, but every second before it
+    // is a second added to the phase -- the clock restarts from zero either way
+    if (!straggled && quietMin() > GRACE * 0.2) {
+      straggled = true;
+      quiet.default = 0;
+      tails.default += 2;
+      flash("group");
+      feed("default", "one last org change applied — a delayed task fired after the freeze; its quiet clock resets");
     }
-    if (!alive()) return;
-    if (evictNow) { moved = true; break; }
-
-    // disaster revert: for a fully-broken sink only -- routing returns to the frozen
-    // source copy; everything written since the flip is abandoned. Terminal for the move.
-    feed("setup", "operator: disaster revert");
-    await wait(1800); if (!alive()) return;
-    feed("setup", "routing flipped back — evil-corp served by the source copy, frozen at the flip point; all post-flip writes abandoned");
-    feed("setup", "sink copy discarded — a future attempt starts over with a fresh snapshot");
-    setPhase("reverted", "reverted — org back on the source as of the flip point; the move must start over");
     renderSide();
-    return;
+    if (quietMin() >= GRACE) break;
   }
   if (!alive()) return;
-
-  // eviction: even the parachute is gone after this -- a bounded delete job, store by store
-  setPhase("evict", "precondition checks, then delete — a bounded job, children first per store");
-  feed("setup", "operator: evict source copy");
-  feed("setup", "precondition verified: no slot for the org survives anywhere — a live slot would stream the coming deletes to the sink (the cli guard)");
+  feed("move", `org quiet ≥ ${GRACE}s on every stream — upstream drained and everything applied, by observation alone`);
+  feed(null, "files and metrics carried no org change this move: nothing to drain, so they stay neutral rather than going green");
+  setPhase("freeze", "verifying the copy");
   await wait(1600); if (!alive()) return;
-  feed("setup", "membership + progress records archived; project creates/deletes are safe again");
-  await wait(1200); if (!alive()) return;
-  setPhase("evict", "deleting evil-corp from the source — a bounded job, children first within each store");
-  const EVICT_NOTES = {
-    default: "rows deleted children-first (the snapshot walk, reversed)",
-    attachments: "rows deleted; attachment blobs removed with them (per-row bucket)",
-    files: "rows deleted; filestore blobs left in place — content-addressed and shared, GC reclaims them",
-    errors: "org rows purged from the partitions",
-    eap: "org rows purged from the partitions",
-  };
+  feed("move", "every table and blob store matches on both sides");
+  await gate("next: cut over ›"); if (!alive()) return;
+
+  // the flip: effectively irreversible -- what remains is a parachute, not a road back
+  setPhase("cutover", "flipping routing to the sink cell");
+  feed("move", "operator: cut over");
+  await wait(1500); if (!alive()) return;
+  clearInterval(jitter);
+  for (const n of Object.keys(quiet)) quiet[n] = null;
+  for (const n of Object.keys(tails)) tails[n] = null;
+  Object.values(paths).forEach(p => p.classList.remove("live"));
+  feed("move", "routing flipped: evil-corp is now served by the sink cell; buffered writes replay there");
+  feed("move", "streams stopped; slots + publications dropped — the source copy is retained, frozen at the flip point, until eviction");
+  setPhase("cutover", "org is on the sink, evict source copy when confident");
+  renderSide();
+  await wait(2200); if (!alive()) return;
+  feed("move", "sink cell healthy: ingest, queries and error rates nominal for evil-corp");
+  feed(null, "the only exit left is a disaster revert — routing back to the frozen source copy, every sink write since the flip abandoned; the move is over either way");
+  await gate("next: clean up ›"); if (!alive()) return;
+
+  // teardown then the source copy. The order is the load-bearing part -- a surviving slot would
+  // stream the coming deletes to the sink -- so it gets a line; the per-store delete walk does not
+  setPhase("cleanup", "plumbing torn down, then the source copy deleted");
+  feed("move", "operator: clean up");
+  await wait(1400); if (!alive()) return;
+  feed("move", "every slot and publication goes first — a surviving slot would stream the coming deletes to the sink");
   for (const s of STORES) {
-    if (!alive()) return;
-    const card = $(`s-${s.name}`);
-    card.classList.add("copying");
-    await wait(900); if (!alive()) return;
-    feed("setup", `${s.name}: ${EVICT_NOTES[s.name]}`);
-    card.classList.remove("copying");
+    await wait(450); if (!alive()) return;
+    // one line per store, mirroring the pair each of them wrote on the way in
+    feed(s.name, `slot and publications dropped: ${pubName(s.name)}`);
   }
-  feed("ok", "source copy evicted — the move is complete");
+  await wait(1200); if (!alive()) return;
+  feed("move", "source copy evicted — the move is complete");
   setPhase("done", "org moved — nothing of evil-corp remains on the old cell");
+  onGo = () => location.reload();
+  setCta("↻ replay");
   renderSide();
 }
 
 drawEdges();
 addEventListener("resize", drawEdges);
-$("btn-cut").onclick = () => {
-  if ($("btn-cut").disabled) return;
-  if (phaseNow === "streaming") freezeNow = true;
-  else if (phaseNow === "freeze") cutNow = true;  // stakes live in the hover title, not a popup
-  else if (phaseNow === "cutover" &&
-             confirm("Evict evil-corp from the source cell?\n\n" +
-                     "This deletes the old copy. Even the disaster revert will no longer be possible.")) {
-    evictNow = true;
-  }
-  renderSide();  // the decision registers instantly, not on the next tick
-};
-$("btn-thaw").onclick = () => {
-  if (phaseNow === "cutover") {
-    if (confirm("Disaster revert?\n\nevil-corp returns to the source copy as of the flip " +
-                "point. ALL writes made since cutover are abandoned. Only for a fully-broken sink."))
-      failbackNow = true;
-  } else if (phaseNow === "freeze" || freezeNow) thawNow = true;
-  renderSide();
-};
 play();
 </script>
 </body>
