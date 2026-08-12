@@ -8,16 +8,15 @@ re-delivery on the stream side, still absorbed by idempotent apply."""
 
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 
-import psycopg
 import psycopg2
 import psycopg2.extras
 from psycopg import Connection
 from psycopg2.extras import LogicalReplicationConnection
 
-from .config import Cell, Graph, connect, with_timeouts
+from .config import SNAPSHOT_TIMEOUTS, TIMEOUTS, Cell, Graph, connect, with_timeouts
 from .utils import trust_sql
 
 
@@ -158,10 +157,13 @@ def drop_publication(conn: Connection, name: str) -> None:
     conn.execute(trust_sql(f"DROP PUBLICATION IF EXISTS {name}"))
 
 
-def connect_replication(dsn: str) -> LogicalReplicationConnection:
-    # psycopg2 hands the DSN to libpq just the same, and this is the longest-lived connection here:
-    # a stream that blackholes without the deadlines stalls the mover with nothing raised anywhere.
-    return psycopg2.connect(with_timeouts(dsn), connection_factory=LogicalReplicationConnection)
+def connect_replication(
+    dsn: str, timeouts: Mapping[str, int] = TIMEOUTS
+) -> LogicalReplicationConnection:
+    # psycopg2 hands the DSN to libpq the same way as psycopg3, so with_timeouts applies here too
+    return psycopg2.connect(
+        with_timeouts(dsn, timeouts), connection_factory=LogicalReplicationConnection
+    )
 
 
 @contextmanager
@@ -208,7 +210,7 @@ def create_slot(dsn: str, name: str) -> Iterator[tuple[str, str]]:
 
     On clean exit the slot survives so the stream can resume it later.
     """
-    repl = connect_replication(dsn)
+    repl = connect_replication(dsn, SNAPSHOT_TIMEOUTS)
     try:
         with repl.cursor() as cur:
             cur.execute(f'CREATE_REPLICATION_SLOT "{name}" LOGICAL pgoutput')
@@ -226,7 +228,7 @@ def create_slot(dsn: str, name: str) -> Iterator[tuple[str, str]]:
 
 def _drop_best_effort(dsn: str, name: str) -> None:
     try:
-        with psycopg.connect(dsn, autocommit=True) as conn:
+        with connect(dsn) as conn:
             drop_replication_slot(conn, name)
         print(f"Cleaned up slot {name}")
     except Exception as e:

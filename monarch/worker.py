@@ -20,7 +20,7 @@ from contextlib import ExitStack, closing
 from . import move, slot
 from .blobs import Bucket, blob_copiers
 from .cell_eviction import run_evict
-from .config import Cell, Graph, connect, list_migrated_blobs
+from .config import SNAPSHOT_TIMEOUTS, Cell, Graph, connect, list_migrated_blobs
 from .membership import BlobMembership
 from .snapshot import Source, derive_membership, estimate_rows, read_frozen_ids, run_snapshot
 from .stream import StreamSource, run_streams
@@ -64,9 +64,12 @@ def snapshot(
     blob_members = {b: BlobMembership(book, m.id, b) for b in blobs}
 
     with ExitStack() as stack:
-        # the static spine may live in another store's db, so read every source db
+        # The frozen ids may live in another store's db, so read every source db.
+        # Uses higher SNAPSHOT_TIMEOUTS just for the three connections the copy holds open, since
+        # losing any of them rolls the whole thing back
         src_conns = {
-            d.decode_dsn: stack.enter_context(connect(d.decode_dsn)) for d in source.databases
+            d.decode_dsn: stack.enter_context(connect(d.decode_dsn, SNAPSHOT_TIMEOUTS))
+            for d in source.databases
         }
         frozen_ids = read_frozen_ids(graph, source, src_conns, org_id)
         decode = src_conns[src_db.decode_dsn]
@@ -86,12 +89,16 @@ def snapshot(
 
         for b in blobs:
             move.MoveUnit(m, b).transition(move.UnitStatus.COPYING, note="recording keys")
-        sinks = {sink_db.primary_dsn: stack.enter_context(connect(sink_db.primary_dsn))}
+        sinks = {
+            sink_db.primary_dsn: stack.enter_context(
+                connect(sink_db.primary_dsn, SNAPSHOT_TIMEOUTS)
+            )
+        }
         static_keys = {graph.root: [org_id], **frozen_ids}
         name = slot.slot_name(org_id, store)
         with slot.nudge_running_xacts([src_db.primary_dsn] if src_db.standby_dsn else []):
             lsn, snap = stack.enter_context(slot.create_slot(src_db.decode_dsn, name))
-            sconn = stack.enter_context(connect(src_db.decode_dsn))
+            sconn = stack.enter_context(connect(src_db.decode_dsn, SNAPSHOT_TIMEOUTS))
         unit.add_event(f"slot created: {name} at {lsn} on {src_db.dbname}")
         _, copied = run_snapshot(
             [Source(store, sconn, snap)],

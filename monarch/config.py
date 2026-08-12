@@ -5,6 +5,7 @@ cells colocate several in one database)."""
 
 import graphlib
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import cached_property
 from typing import Literal, cast
@@ -20,29 +21,35 @@ FLEET = os.environ.get("MONARCH_FLEET", "fleet.yaml")
 Eviction = Literal["delete", "keep"]
 
 
-# Handle a peer that vanishes without closing -- the cell VM destroyed under us, a partitioned node --
-# leaves TCP with nothing to report: the socket stays ESTABLISHED and a read on it blocks forever.
+# Handle a peer that vanishes without closing -- the cell VM destroyed under us, a partitioned
+# node -- leaves TCP with nothing to report: the socket stays ESTABLISHED and a read on it
+# blocks forever.
 #
 # Safe for the movers' long snapshot and streaming as keepalive probes are answered by the peer's
 # kernel even if Postgres is busy.
 TIMEOUTS = {
     "connect_timeout": 5,  # seconds
-    "keepalives_idle": 30,  # seconds of silence before the kernel starts probing
+    "keepalives_idle": 30,  # seconds of inactivity before the kernel starts probing
     "tcp_user_timeout": 60_000,  # in milliseconds, give up after 60s if no answer
 }
 
+# Snapshot gets a higher 10 minute ceiling, as it is the one operation whose connection
+# death is expensive: the run might take hours and a drop would roll all of it back.
+SNAPSHOT_TIMEOUTS = TIMEOUTS | {"tcp_user_timeout": 600_000}
 
-def with_timeouts(dsn: str) -> str:
-    """`dsn` with the TIMEOUTS defaults filled in for whatever it doesn't already set, so a
-    fleet.yaml that has deliberately tuned one of these keeps its own value."""
+
+def with_timeouts(dsn: str, timeouts: Mapping[str, int] = TIMEOUTS) -> str:
+    """`dsn` with `timeouts` filled in for whatever it doesn't already set, so a fleet.yaml that
+    has deliberately tuned one of these keeps its own value."""
     given = conninfo_to_dict(dsn)
-    return make_conninfo(dsn, **{k: v for k, v in TIMEOUTS.items() if k not in given})
+    return make_conninfo(dsn, **{k: v for k, v in timeouts.items() if k not in given})
 
 
-def connect(dsn: str) -> psycopg.Connection:
+def connect(dsn: str, timeouts: Mapping[str, int] = TIMEOUTS) -> psycopg.Connection:
     """An autocommit connection: the ledger and cell reads/writes here manage their own
-    transactions explicitly (move.transition, snapshot's pinned reads)."""
-    return psycopg.connect(with_timeouts(dsn), autocommit=True)
+    transactions explicitly (move.transition, snapshot's pinned reads). Snapshot callers pass
+    SNAPSHOT_TIMEOUTS; see it for why they alone want the slacker ceiling."""
+    return psycopg.connect(with_timeouts(dsn, timeouts), autocommit=True)
 
 
 # `migrate` false means no mover unit: no slot, no publication, no stream, no eviction. On a bucket

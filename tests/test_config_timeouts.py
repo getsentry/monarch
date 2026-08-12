@@ -1,6 +1,6 @@
 from psycopg.conninfo import conninfo_to_dict
 
-from monarch.config import TIMEOUTS, with_timeouts
+from monarch.config import SNAPSHOT_TIMEOUTS, TIMEOUTS, with_timeouts
 
 
 def test_fills_in_every_deadline():
@@ -17,3 +17,9 @@ def test_a_tuned_dsn_keeps_its_own_value():
 
     assert info["connect_timeout"] == "30"
     assert info["tcp_user_timeout"] == str(TIMEOUTS["tcp_user_timeout"])  # the rest still apply
+
+
+def test_higher_snapshot_ceiling():
+    # snapshot has a higher ceiling because a copy that has run for hours is expensive to
+    # throw away, a stream just resumes from its slot's confirmed point
+    assert SNAPSHOT_TIMEOUTS["tcp_user_timeout"] > TIMEOUTS["tcp_user_timeout"]
