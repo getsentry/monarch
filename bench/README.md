@@ -30,3 +30,13 @@ than the memory available to it — so it really does hit disk.
   cell serving other customers, and we are only moving some of the rows in each table. Dropping
   indexes and rebuilding them, turning off triggers, unlogged tables, truncating before loading —
   aren't available to a live cell.
+
+## Org 1 copy time
+
+| Store | Production rows | Estimated copy time |
+|---|---:|---:|
+| `files` | 32.2M | **37 min** |
+| `default` | 19.7M | 22 min |
+| `crons` | 4.52M | 5.1 min |
+
+At 14,687 rows/s; stores run in parallel, so **~37 min overall**, excluding catch-up and cut-over.
