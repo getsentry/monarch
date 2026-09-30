@@ -56,9 +56,11 @@ EXCLUDED_STORES = {"control"}
 # `default` store, including the whole sink -- so the copy hits a ForeignKeyViolation on arrival.
 # Excluded by hand rather than derived: the constraint that proves the dependency is CASCADE-dropped
 # in some databases and kept in others, so no single database can be introspected for it. Add a line
-# when a table breaks. The whole block goes away when the file cluster gets FileBlobIndex-derived
+# when a table breaks. The file exclusions go away when the cluster gets FileBlobIndex-derived
 # membership (FILEBLOBS.md) -- these are real org data, not junk.
 EXCLUDED_MODELS = {
+    # Retired legacy alert audit log; exclude it even when using an older org-tree export.
+    "sentry.alertruleactivity",
     "uptime.uptimeresponsecapture",
     "workflow_engine.action",
     "sentry.fileblob",

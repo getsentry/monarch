@@ -1227,13 +1227,6 @@ relationships:
     refs:
       project_id:
         parent: sentry_project
-  sentry_alertruleactivity:
-    store: default
-    primary_key:
-    - id
-    refs:
-      alert_rule_id:
-        parent: sentry_alertrule
   sentry_notificationactionproject:
     store: default
     primary_key:
